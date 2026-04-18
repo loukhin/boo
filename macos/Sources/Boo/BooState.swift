@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import GhosttyKit
 
@@ -27,6 +28,16 @@ final class BooState: ObservableObject {
     /// outlives any individual SwiftUI render — `Ghostty.SurfaceView` is a
     /// heavy NSView with a live PTY + child process.
     @Published var surfaces: [TabID: Ghostty.SurfaceView] = [:]
+
+    /// Combine subscriptions that forward each surface's `$title`/`$pwd`
+    /// into the Bonsplit tab title and (when this is the focused tab) into
+    /// the hosting window's title + proxy icon. Keyed by tab id; cancelled
+    /// when the tab closes.
+    private var surfaceSubscriptions: [TabID: Set<AnyCancellable>] = [:]
+
+    /// Tab currently mirrored into the window chrome (window title + proxy
+    /// icon). Set by `updateWindowChromeTabId()` on focus/selection changes.
+    private var windowChromeTabId: TabID?
 
     private var tabCounter = 0
 
@@ -97,8 +108,91 @@ final class BooState: ObservableObject {
         // didCreateTab/didSelectTab hooks fire synchronously inside
         // createTab — at which point our map is still empty.
         surfaces[tabId] = surface
+        observeSurface(surface, forTab: tabId)
         focusSurface(for: tabId)
+        updateWindowChromeTabId()
         return tabId
+    }
+
+    /// Mirror ghostty's live surface title into Bonsplit's tab title, and
+    /// title+pwd into the window chrome while this tab is focused.
+    ///
+    /// `Ghostty.SurfaceView.title` is `@Published` and starts as an empty
+    /// string, then gets populated once the shell emits an OSC 2 /
+    /// `$PROMPT_COMMAND` / `set_title` action. We ignore empty strings so
+    /// the tab doesn't briefly show a blank label during startup; the
+    /// initial "Terminal" placeholder stays until the shell reports its
+    /// first real title.
+    ///
+    /// `SurfaceView.pwd` is updated from ghostty's `set_pwd` action (OSC 7
+    /// / shell integration). When set on the focused tab, we feed it into
+    /// `window.representedURL` so macOS draws the native proxy icon with
+    /// drag + ⌘-click breadcrumb support. This is the same approach
+    /// `BaseTerminalController.pwdDidChange` uses upstream.
+    private func observeSurface(_ surface: Ghostty.SurfaceView, forTab tabId: TabID) {
+        var subs: Set<AnyCancellable> = []
+
+        surface.$title
+            .removeDuplicates()
+            .sink { [weak self] newTitle in
+                guard let self else { return }
+                if !newTitle.isEmpty {
+                    self.controller.updateTab(tabId, title: newTitle)
+                }
+                if self.windowChromeTabId == tabId {
+                    self.applyWindowChrome(title: newTitle, pwd: surface.pwd)
+                }
+            }
+            .store(in: &subs)
+
+        surface.$pwd
+            .removeDuplicates()
+            .sink { [weak self] newPwd in
+                guard let self, self.windowChromeTabId == tabId else { return }
+                self.applyWindowChrome(title: surface.title, pwd: newPwd)
+            }
+            .store(in: &subs)
+
+        surfaceSubscriptions[tabId] = subs
+    }
+
+    // MARK: - Window chrome
+
+    /// Recompute which tab's title/pwd the window should mirror, based on
+    /// Bonsplit's focused pane + selected tab. Call after any focus or
+    /// selection change.
+    private func updateWindowChromeTabId() {
+        let newId: TabID?
+        if let paneId = controller.focusedPaneId,
+           let tab = controller.selectedTab(inPane: paneId) {
+            newId = tab.id
+        } else {
+            newId = nil
+        }
+
+        windowChromeTabId = newId
+
+        if let newId, let surface = surfaces[newId] {
+            applyWindowChrome(title: surface.title, pwd: surface.pwd)
+        } else {
+            applyWindowChrome(title: nil, pwd: nil)
+        }
+    }
+
+    /// Push the computed title/pwd onto the hosting `NSWindow`. Setting
+    /// `representedURL` alongside a non-empty title is what makes macOS
+    /// draw the proxy icon; clearing both hides it.
+    private func applyWindowChrome(title: String?, pwd: String?) {
+        guard let window else { return }
+
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        window.title = trimmed.isEmpty ? "Boo" : trimmed
+
+        if let pwd, !pwd.isEmpty {
+            window.representedURL = URL(fileURLWithPath: pwd)
+        } else {
+            window.representedURL = nil
+        }
     }
 
     // MARK: - Split ops
@@ -226,6 +320,8 @@ extension BooState: BonsplitDelegate {
         fromPane pane: PaneID
     ) {
         surfaces.removeValue(forKey: tabId)
+        surfaceSubscriptions.removeValue(forKey: tabId)
+        updateWindowChromeTabId()
 
         if surfaces.isEmpty {
             // Defer the close to the next runloop tick so Bonsplit
@@ -251,6 +347,7 @@ extension BooState: BonsplitDelegate {
     ) {
         DispatchQueue.main.async { [weak self] in
             self?.focusCurrentTabSurface()
+            self?.updateWindowChromeTabId()
         }
     }
 
@@ -293,6 +390,17 @@ extension BooState: BonsplitDelegate {
         inPane pane: PaneID
     ) {
         focusSurface(for: tab.id)
+        updateWindowChromeTabId()
+    }
+
+    /// Track pane focus changes (e.g., user clicks into a different pane)
+    /// so the window title/proxy icon switch to reflect the newly active
+    /// pane's selected tab.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        didFocusPane pane: PaneID
+    ) {
+        updateWindowChromeTabId()
     }
 
     /// Move AppKit first-responder focus to this tab's surface.
