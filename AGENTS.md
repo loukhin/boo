@@ -31,6 +31,30 @@ A file for [guiding coding agents](https://agents.md/).
 - macOS app: `macos/`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
 
+## Boo-specific Guidelines
+
+Boo is a ghostty fork that replaces the macOS app's window/tab/split UI
+with Bonsplit. When integrating, prefer working **with** ghostty's
+existing architecture instead of re-implementing pieces:
+
+- Use ghostty's `Ghostty.SurfaceWrapper` / `Ghostty.SurfaceRepresentable`
+  for hosting surfaces — they already solve Metal sizing, focus,
+  resize overlays, and secure input.
+- Use ghostty's `Ghostty.moveFocus(to:)` for pushing first-responder
+  focus into a surface (it has retry-with-backoff for when SwiftUI
+  hasn't hosted the NSView yet).
+- Use ghostty's notification names (`Ghostty.Notification.ghosttyNewTab`,
+  `ghosttyNewSplit`, `ghosttyCloseSurface`, …) for action routing; don't
+  invent parallel mechanisms.
+- Use ghostty's `Ghostty.App` as the runtime handle (one per process)
+  and inject it as an `@EnvironmentObject` for any surface-owning view.
+- If something ghostty does looks wrong for Boo, first check whether
+  it's solving a real problem (IME, HiDPI, focus races, etc.) before
+  replacing it.
+
+The Boo-specific layer (`macos/Sources/Boo/**`) should be thin: it
+translates ghostty actions into Bonsplit operations and nothing more.
+
 ## Issue and PR Guidelines
 
 - Never create an issue.

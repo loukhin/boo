@@ -1,51 +1,89 @@
 import SwiftUI
-import Bonsplit
+import GhosttyKit
 
-/// Top-level SwiftUI content of a Boo window. A `BonsplitView` whose tab
-/// contents are ghostty surfaces.
+// Bonsplit is vendored in macos/Sources/Bonsplit — same target, no import.
+
+/// Top-level SwiftUI content of a Boo window.
+///
+/// Each Bonsplit tab hosts a ghostty surface via `Ghostty.SurfaceWrapper`,
+/// which is the same wrapper used by upstream ghostty's `TerminalView`. Using
+/// the upstream wrapper gives us correct sizing (its `GeometryReader`-driven
+/// Metal surface plumbing is battle-tested) and hands us SwiftUI focus
+/// tracking via `focusedValue(\.ghosttySurfaceView, …)` for free.
+///
+/// A thin observer layer reads that focused-value at the root and syncs it
+/// into Bonsplit's pane focus, which Bonsplit doesn't otherwise learn about
+/// when the user clicks inside a surface (Bonsplit only updates focus when
+/// its own tab-bar UI is clicked).
 struct BooRootView: View {
     @ObservedObject var state: BooState
 
     var body: some View {
         BonsplitView(controller: state.controller) { tab, paneId in
-            // Bonsplit's tab bar does not invoke the `didSelectTab` delegate
-            // when the user clicks a tab in the UI (it calls pane.selectTab
-            // directly, bypassing the controller). So we compute selection
-            // here and hand it to the surface container, which uses
-            // `.onChange` to grab AppKit focus when it becomes selected.
+            // Computed here so the body re-evaluates when Bonsplit's
+            // PaneState (@Published selectedTabId) changes — that's our
+            // hook for "user clicked a tab in the tab bar", since
+            // Bonsplit's didSelectTab delegate does NOT fire for tab-bar
+            // clicks (it only fires for programmatic selection).
             let isSelected = state.controller.selectedTab(inPane: paneId)?.id == tab.id
 
             if let surface = state.surfaces[tab.id] {
                 BooSurfaceContainer(
                     surface: surface,
-                    isSelected: isSelected
+                    isSelected: isSelected,
+                    paneId: paneId,
+                    state: state
                 )
+                // The `layoutEpoch` is bumped after any pane close so that
+                // surviving containers get a fresh SwiftUI identity and
+                // force-remount. This is how we recover from Bonsplit's
+                // split-tree collapse orphaning the surface's NSView —
+                // the new mount re-runs makeOSView and re-parents cleanly.
+                .id("\(ObjectIdentifier(surface).hashValue)-\(state.layoutEpoch)")
             } else {
                 BooTabPlaceholder(title: tab.title)
             }
         }
+        // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
+        // for config access (split dimming, resize overlay, etc.).
+        .environmentObject(state.ghostty)
         .frame(minWidth: 600, minHeight: 400)
     }
 }
 
-/// Wraps a `Ghostty.SurfaceView` in the SurfaceRepresentable so SwiftUI can
-/// host it. The `isSelected` binding tracks whether this tab is currently
-/// selected in its pane; when it flips to true we push AppKit
-/// first-responder focus into the surface.
+/// Wraps a single ghostty surface for one tab. Uses upstream
+/// `Ghostty.SurfaceWrapper` so we inherit its correct Metal-surface sizing
+/// and SwiftUI focus machinery.
 private struct BooSurfaceContainer: View {
     let surface: Ghostty.SurfaceView
     let isSelected: Bool
+    let paneId: PaneID
+    let state: BooState
+
+    /// Surface that SwiftUI currently reports as focused. `SurfaceWrapper`
+    /// publishes this via `.focusedValue(\.ghosttySurfaceView, surfaceView)`;
+    /// reading it here lets us tell Bonsplit which pane is now active when
+    /// the user clicks into a surface.
+    @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
 
     var body: some View {
-        GeometryReader { geo in
-            Ghostty.SurfaceRepresentable(view: surface, size: geo.size)
-        }
-        .background(Color(nsColor: .textBackgroundColor))
-        .onChange(of: isSelected) { _, nowSelected in
-            if nowSelected {
-                Ghostty.moveFocus(to: surface)
+        Ghostty.SurfaceWrapper(surfaceView: surface, isSplit: true)
+            // Push AppKit first-responder into our surface when the user
+            // clicks a different Bonsplit tab. Without this, tab-bar clicks
+            // change selection but the old tab's surface keeps keyboard
+            // focus (see note above about didSelectTab not firing).
+            .onChange(of: isSelected) { _, nowSelected in
+                if nowSelected {
+                    Ghostty.moveFocus(to: surface)
+                }
             }
-        }
+            // When SwiftUI focus lands on this tab's surface (via click or
+            // tab switch), update Bonsplit's focused pane so subsequent
+            // splits / closes target the correct pane.
+            .onChange(of: focusedSurface) { _, newFocus in
+                guard let newFocus, newFocus === surface else { return }
+                state.controller.focusPane(paneId)
+            }
     }
 }
 

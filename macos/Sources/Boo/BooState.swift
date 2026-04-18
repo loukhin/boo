@@ -1,7 +1,8 @@
 import Foundation
 import SwiftUI
-import Bonsplit
 import GhosttyKit
+
+// Bonsplit is vendored in macos/Sources/Bonsplit — same target, no import.
 
 /// Per-window Boo state. Owns the Bonsplit controller, the surfaces hosted by
 /// its tabs, and the notification subscriptions that translate ghostty action
@@ -27,6 +28,17 @@ final class BooState: ObservableObject {
     /// heavy NSView with a live PTY + child process.
     @Published var surfaces: [TabID: Ghostty.SurfaceView] = [:]
 
+    /// Version counter bumped whenever the layout tree restructures in a
+    /// way that risks detaching surfaces from their parent NSView chain
+    /// (currently: pane closes, which trigger Bonsplit's split-collapse).
+    /// SwiftUI view identities in `BooRootView` include this epoch so the
+    /// affected containers force a clean re-mount, letting
+    /// `Ghostty.SurfaceRepresentable.makeOSView` run again and properly
+    /// re-parent the surface via `documentView.addSubview(surfaceView)`.
+    ///
+    /// See also the SplitContainerView bug report in the BooState notes.
+    @Published var layoutEpoch: Int = 0
+
     private var tabCounter = 0
 
     init(ghostty: Ghostty.App) {
@@ -45,17 +57,41 @@ final class BooState: ObservableObject {
 
         // Seed one initial tab so the window isn't empty on open.
         newTab()
+
+        // Bonsplit seeds every new window with a default "Welcome" tab
+        // (title "Welcome", icon "star"). There's no public config to
+        // disable it, so we find and close it after creating our own
+        // first tab. See bonsplitboo project for the original workaround.
+        // If Bonsplit ever adds an option to suppress the welcome tab,
+        // this can be removed.
+        removeBonsplitWelcomeTab()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
 
+    private func removeBonsplitWelcomeTab() {
+        for paneId in controller.allPaneIds {
+            let tabs = controller.tabs(inPane: paneId)
+            if let welcome = tabs.first(where: {
+                $0.title == "Welcome" && $0.icon == "star"
+            }) {
+                _ = controller.closeTab(welcome.id)
+                return
+            }
+        }
+    }
+
     // MARK: - Tab ops
 
     /// Create a new Bonsplit tab and spawn a fresh ghostty surface into it.
+    /// If `paneId` is nil, the tab goes to Bonsplit's focused pane.
     @discardableResult
-    func newTab(baseConfig: Ghostty.SurfaceConfiguration? = nil) -> TabID? {
+    func newTab(
+        inPane paneId: PaneID? = nil,
+        baseConfig: Ghostty.SurfaceConfiguration? = nil
+    ) -> TabID? {
         guard let app = ghostty.app else { return nil }
 
         tabCounter += 1
@@ -63,21 +99,60 @@ final class BooState: ObservableObject {
 
         guard let tabId = controller.createTab(
             title: "Terminal",
-            icon: "terminal"
+            icon: "terminal",
+            inPane: paneId
         ) else { return nil }
 
-        // Assign the surface BEFORE any delegate callbacks run. Bonsplit
-        // fires didCreateTab / didSelectTab synchronously inside
-        // `createTab`, so if we assigned after it, those callbacks would
-        // see an empty surfaces map.
-        //
-        // NOTE: Bonsplit's createTab currently returns AFTER the sync
-        // callbacks fire, which means this line still runs too late for
-        // the delegate hooks. We focus manually here instead.
+        // We store the surface AFTER createTab returns (since Bonsplit
+        // gives us the tabId then) and manually focus, because Bonsplit's
+        // didCreateTab/didSelectTab hooks fire synchronously inside
+        // createTab — at which point our map is still empty.
         surfaces[tabId] = surface
         focusSurface(for: tabId)
         return tabId
     }
+
+    // MARK: - Split ops
+
+    /// Split the pane containing `sourceSurface` in the given ghostty
+    /// direction, spawning a fresh surface in the new pane. The source
+    /// pane keeps its existing surface(s).
+    private func splitPane(
+        from sourceSurface: Ghostty.SurfaceView,
+        direction: ghostty_action_split_direction_e,
+        baseConfig: Ghostty.SurfaceConfiguration? = nil
+    ) {
+        // Ghostty's 4 directions collapse to Bonsplit's 2 orientations
+        // — we lose "which side", which is fine for MVP. Users mostly
+        // split right/down anyway.
+        let orientation: SplitOrientation
+        switch direction {
+        case GHOSTTY_SPLIT_DIRECTION_RIGHT, GHOSTTY_SPLIT_DIRECTION_LEFT:
+            orientation = .horizontal
+        case GHOSTTY_SPLIT_DIRECTION_DOWN, GHOSTTY_SPLIT_DIRECTION_UP:
+            orientation = .vertical
+        default:
+            return
+        }
+
+        // Stash the source and config for didSplitPane to pick up when
+        // it spawns the new surface.
+        pendingSplitSource = sourceSurface
+        pendingSplitConfig = baseConfig
+        _ = controller.splitPane(orientation: orientation)
+    }
+
+    /// Temporary holder for the ghostty surface config to apply to the
+    /// next surface created in response to a splitPane.
+    private var pendingSplitConfig: Ghostty.SurfaceConfiguration?
+
+    /// Temporary holder for the surface that requested the split. Used
+    /// as the `from:` argument to `Ghostty.moveFocus` so AppKit's
+    /// implicit `resignFirstResponder` isn't relied on for switching the
+    /// cursor's focused-vs-unfocused style. Without this, the source
+    /// pane visually keeps its focused (full-block) cursor even though
+    /// typing goes to the new pane.
+    private var pendingSplitSource: Ghostty.SurfaceView?
 
     /// Tab id for a given surface, if we own it.
     private func tabId(for surface: Ghostty.SurfaceView) -> TabID? {
@@ -95,6 +170,12 @@ final class BooState: ObservableObject {
             self,
             selector: #selector(onGhosttyNewTab(_:)),
             name: Ghostty.Notification.ghosttyNewTab,
+            object: nil
+        )
+        nc.addObserver(
+            self,
+            selector: #selector(onGhosttyNewSplit(_:)),
+            name: Ghostty.Notification.ghosttyNewSplit,
             object: nil
         )
         nc.addObserver(
@@ -121,6 +202,17 @@ final class BooState: ObservableObject {
         newTab(baseConfig: cfg)
     }
 
+    @objc private func onGhosttyNewSplit(_ note: Notification) {
+        guard let surface = note.object as? Ghostty.SurfaceView,
+              surfaces.values.contains(where: { $0 === surface }),
+              let direction = note.userInfo?["direction"]
+                as? ghostty_action_split_direction_e else { return }
+
+        let cfg = note.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
+            as? Ghostty.SurfaceConfiguration
+        splitPane(from: surface, direction: direction, baseConfig: cfg)
+    }
+
     @objc private func onGhosttyCloseSurface(_ note: Notification) {
         guard let surface = note.object as? Ghostty.SurfaceView,
               let tabId = tabId(for: surface) else { return }
@@ -134,12 +226,72 @@ final class BooState: ObservableObject {
 extension BooState: BonsplitDelegate {
     /// Free the surface when its tab is closed. Without this the surface
     /// (and its child process) would leak for the lifetime of the window.
+    ///
+    /// Also closes the enclosing window when the last surface goes away,
+    /// which is what users expect when they `exit` the shell in the only
+    /// tab of the only pane. Bonsplit leaves the pane visibly empty
+    /// otherwise because `allowCloseLastPane` is false.
     func splitTabBar(
         _ controller: BonsplitController,
         didCloseTab tabId: TabID,
         fromPane pane: PaneID
     ) {
         surfaces.removeValue(forKey: tabId)
+
+        if surfaces.isEmpty {
+            // Defer the close to the next runloop tick so Bonsplit
+            // finishes its own bookkeeping before the window goes away.
+            DispatchQueue.main.async { [weak self] in
+                self?.window?.performClose(nil)
+            }
+        }
+        // Note: structural recovery (epoch bump, focus) is handled by
+        // didClosePane below. A plain tab close that leaves the pane
+        // intact doesn't need any remount — the surface NSViews stay
+        // correctly parented.
+    }
+
+    /// Called when Bonsplit actually destroys a pane (last tab in the
+    /// pane closed and other panes exist, so the split tree collapses).
+    /// This is the only close path that orphans surviving surfaces from
+    /// their NSView chain — and so the only one that needs the SwiftUI
+    /// re-mount + focus push.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        didClosePane paneId: PaneID
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.layoutEpoch &+= 1
+            self.focusCurrentTabSurface()
+        }
+    }
+
+    /// After Bonsplit creates the new pane from a split, populate it with
+    /// a fresh ghostty surface using whatever config was stashed by the
+    /// initiating `splitPane(from:direction:)` call.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        didSplitPane originalPane: PaneID,
+        newPane: PaneID,
+        orientation: SplitOrientation
+    ) {
+        let cfg = pendingSplitConfig
+        let source = pendingSplitSource
+        pendingSplitConfig = nil
+        pendingSplitSource = nil
+
+        guard let tabId = newTab(inPane: newPane, baseConfig: cfg),
+              let newSurface = surfaces[tabId] else { return }
+
+        // Explicitly pass the source surface as `from` so its
+        // `resignFirstResponder` fires reliably — AppKit sometimes
+        // skips it in our setup, leaving the old pane visually focused.
+        // See ghostty's `Ghostty.moveFocus` comment about the same
+        // workaround.
+        if let source {
+            Ghostty.moveFocus(to: newSurface, from: source)
+        }
     }
 
     // didCreateTab intentionally NOT implemented: surfaces are only created
@@ -150,7 +302,7 @@ extension BooState: BonsplitDelegate {
     /// Focus the surface when the user switches tabs.
     func splitTabBar(
         _ controller: BonsplitController,
-        didSelectTab tab: Bonsplit.Tab,
+        didSelectTab tab: Tab,
         inPane pane: PaneID
     ) {
         focusSurface(for: tab.id)
