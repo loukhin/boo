@@ -19,22 +19,29 @@ struct TabItemView: View {
                     .foregroundStyle(isSelected ? TabBarColors.activeText : TabBarColors.inactiveText)
             }
 
-            // Title
+            // Title. Constrained directly so the tab hugs its content
+            // instead of padding the space between title and close button
+            // out to `tabMaxWidth`. Long titles still truncate at the
+            // title-level max; short titles produce a naturally compact tab.
             Text(tab.title)
                 .font(.system(size: TabBarMetrics.titleFontSize))
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: TabBarMetrics.tabTitleMaxWidth, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(isSelected ? TabBarColors.activeText : TabBarColors.inactiveText)
-
-            Spacer(minLength: 4)
 
             // Close button or dirty indicator
             closeOrDirtyIndicator
         }
-        .padding(.horizontal, TabBarMetrics.tabHorizontalPadding)
+        // Asymmetric padding: full horizontal padding on the leading side
+        // (for the icon/title), tighter on the trailing side so the close
+        // button sits closer to the edge and the tab feels more compact.
+        .padding(.leading, TabBarMetrics.tabHorizontalPadding)
+        .padding(.trailing, TabBarMetrics.tabTrailingPadding)
         .offset(y: isSelected ? 0.5 : 0)
         .frame(
             minWidth: TabBarMetrics.tabMinWidth,
-            maxWidth: TabBarMetrics.tabMaxWidth,
             minHeight: TabBarMetrics.tabHeight,
             maxHeight: TabBarMetrics.tabHeight
         )

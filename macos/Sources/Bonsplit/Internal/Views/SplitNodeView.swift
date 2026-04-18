@@ -22,7 +22,6 @@ struct SplitNodeView<Content: View, EmptyContent: View>: View {
         case .pane(let paneState):
             PaneContainerView(
                 pane: paneState,
-                controller: controller,
                 contentBuilder: contentBuilder,
                 emptyPaneBuilder: emptyPaneBuilder,
                 showSplitButtons: showSplitButtons,

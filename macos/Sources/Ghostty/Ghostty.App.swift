@@ -1133,9 +1133,17 @@ extension Ghostty {
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
 
-                    // Similar to goto_split (see comment there) about our performability,
-                    // we should make this more accurate later.
-                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 else { return false }
+                    // Performability: for ghostty's native tabbed windows,
+                    // skip when there's only one tab so the key falls through
+                    // to the terminal. Non-BaseTerminalController windows
+                    // (e.g. Boo, which runs its own tab model) always consume
+                    // — the keybind is unlikely to collide with terminal
+                    // input anyway. A future polish would expose a host-side
+                    // `canGotoTab` hook for accurate gating.
+                    if surfaceView.window?.windowController is BaseTerminalController,
+                       (surfaceView.window?.tabGroup?.windows.count ?? 0) <= 1 {
+                        return false
+                    }
 
                     NotificationCenter.default.post(
                         name: Notification.ghosttyGotoTab,
@@ -1164,26 +1172,36 @@ extension Ghostty {
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
-
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
-                    // Convert the C API direction to our Swift type
                     guard let splitDirection = SplitFocusDirection.from(direction: direction) else { return false }
 
-                    // Find the current node in the tree
-                    guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
+                    // Fast path for ghostty's own BaseTerminalController: we
+                    // use its SplitTree to check performability, so pressing
+                    // an arrow key with no split in that direction falls
+                    // through to the terminal instead of being consumed.
+                    if let controller = surfaceView.window?.windowController as? BaseTerminalController {
+                        // If the window has no splits, the action is not performable
+                        guard controller.surfaceTree.isSplit else { return false }
 
-                    // Check if a split actually exists in the target direction before
-                    // returning true. This ensures performable keybinds only consume
-                    // the key event when we actually perform navigation.
-                    let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
-                    guard controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode) != nil else {
-                        return false
+                        // Find the current node in the tree
+                        guard let targetNode = controller.surfaceTree.root?.node(view: surfaceView) else { return false }
+
+                        // Check if a split actually exists in the target direction before
+                        // returning true. This ensures performable keybinds only consume
+                        // the key event when we actually perform navigation.
+                        let focusDirection: SplitTree<Ghostty.SurfaceView>.FocusDirection = splitDirection.toSplitTreeFocusDirection()
+                        guard controller.surfaceTree.focusTarget(for: focusDirection, from: targetNode) != nil else {
+                            return false
+                        }
                     }
 
-                    // We have a valid target, post the notification to perform the navigation
+                    // Post the notification. Both BaseTerminalController and
+                    // Boo's BooState subscribe to this and navigate using
+                    // their own pane-tracking data structures. For non-
+                    // BaseTerminalController windows we skip the
+                    // performability check above and always consume the
+                    // keybind — acceptable because these aren't typical
+                    // terminal input sequences. A future polish: expose a
+                    // `canNavigate` hook on Bonsplit so Boo can gate too.
                     NotificationCenter.default.post(
                         name: Notification.ghosttyFocusSplit,
                         object: surfaceView,

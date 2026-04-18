@@ -15,8 +15,20 @@ struct SplitViewContainer<Content: View, EmptyContent: View>: View {
         GeometryReader { geometry in
             splitNodeContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .focusable()
-                .focusEffectDisabled()
+                // NOTE: previously this view was `.focusable()` (with a
+                // `.focusEffectDisabled()` to hide the ring). That
+                // collaborates with a focus-owning child (in Boo, ghostty's
+                // `SurfaceRepresentable` uses `.focused($surfaceFocus)`)
+                // to produce a focus tug-of-war: clicking a surface nested
+                // inside splits causes SwiftUI to re-resolve focus up to
+                // this container, which can bounce the @FocusedValue
+                // between adjacent panes and oscillate the visible cursor.
+                //
+                // Bonsplit's own navigation uses controller state
+                // (`focusedPaneId`), not SwiftUI focus, so removing this
+                // modifier doesn't break anything; hosts that *do* want
+                // keyboard-focusable pane navigation can add it back at
+                // the pane level.
                 .onChange(of: geometry.size) { _, newSize in
                     updateContainerFrame(geometry: geometry)
                 }

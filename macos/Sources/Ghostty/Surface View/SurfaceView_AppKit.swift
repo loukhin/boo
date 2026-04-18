@@ -424,6 +424,18 @@ extension Ghostty {
                     self.notificationIdentifiers = []
                 }
             }
+
+            // Boo needs a focus signal from the actual AppKit surface that
+            // became/resigned first responder. SwiftUI wrapper gestures around
+            // `SurfaceWrapper` proved unreliable in nested split layouts: the
+            // terminal under the mouse could gain focus while a sibling wrapper
+            // received the SwiftUI tap. Posting from the NSView focus callback
+            // gives Boo a source-of-truth event tied to the real surface.
+            NotificationCenter.default.post(
+                name: .ghosttySurfaceFocusDidChange,
+                object: self,
+                userInfo: ["focused": focused]
+            )
         }
 
         override func sizeDidChange(_ size: CGSize) {
@@ -616,11 +628,21 @@ extension Ghostty {
                   event.window != nil,
                   window == event.window else { return event }
 
-            // The clicked location in this window should be this view.
-            let location = convert(event.locationInWindow, from: nil)
-            // We should use window to perform hitTest here,
-            // because there could be some other overlays on top, like search bar
-            guard window.contentView?.hitTest(location) == self else { return event }
+            // The clicked location in this window should resolve to this
+            // surface when hit-tested from the window content view.
+            //
+            // Important: `contentView.hitTest(_:)` expects the point in the
+            // content view's coordinate space, not this surface's local
+            // coordinate space. Using `self.convert(..., from: nil)` here can
+            // mis-identify adjacent surfaces in nested split layouts, causing
+            // first-responder focus to jump to a sibling pane on click.
+            guard let contentView = window.contentView else { return event }
+            let location = contentView.convert(event.locationInWindow, from: nil)
+            // We should use window/contentView to perform hitTest here,
+            // because there could be some other overlays on top, like search bar.
+            let hitView = contentView.hitTest(location)
+            let localPoint = convert(event.locationInWindow, from: nil)
+            guard hitView == self, bounds.contains(localPoint) else { return event }
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.

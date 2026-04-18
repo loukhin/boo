@@ -8,13 +8,8 @@ import GhosttyKit
 /// Each Bonsplit tab hosts a ghostty surface via `Ghostty.SurfaceWrapper`,
 /// which is the same wrapper used by upstream ghostty's `TerminalView`. Using
 /// the upstream wrapper gives us correct sizing (its `GeometryReader`-driven
-/// Metal surface plumbing is battle-tested) and hands us SwiftUI focus
-/// tracking via `focusedValue(\.ghosttySurfaceView, …)` for free.
-///
-/// A thin observer layer reads that focused-value at the root and syncs it
-/// into Bonsplit's pane focus, which Bonsplit doesn't otherwise learn about
-/// when the user clicks inside a surface (Bonsplit only updates focus when
-/// its own tab-bar UI is clicked).
+/// Metal surface plumbing is battle-tested) while Boo keeps pane focus in sync
+/// from the underlying AppKit surface focus callback (`SurfaceView.focusDidChange`).
 struct BooRootView: View {
     @ObservedObject var state: BooState
 
@@ -39,9 +34,7 @@ struct BooRootView: View {
             if let surface = state.surfaces[tab.id] {
                 BooSurfaceContainer(
                     surface: surface,
-                    isSelected: isSelected,
-                    paneId: paneId,
-                    state: state
+                    isSelected: isSelected
                 )
                 // Identity keyed on the surface itself so SwiftUI preserves
                 // the representable across tab/pane reparenting. Bonsplit's
@@ -53,6 +46,11 @@ struct BooRootView: View {
                 BooTabPlaceholder(title: tab.title)
             }
         }
+        // No outer click-to-focus gesture here. Surface clicks are handled
+        // by AppKit at the real terminal NSView level, and Boo syncs Bonsplit
+        // focus from that source-of-truth callback. Bonsplit's own delegate
+        // chain (`didSplitPane`, `didClosePane`, `didSelectTab`) handles the
+        // explicit restore paths after structural changes.
         // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
         // for config access (split dimming, resize overlay, etc.).
         .environmentObject(state.ghostty)
@@ -66,33 +64,21 @@ struct BooRootView: View {
 private struct BooSurfaceContainer: View {
     let surface: Ghostty.SurfaceView
     let isSelected: Bool
-    let paneId: PaneID
-    let state: BooState
-
-    /// Surface that SwiftUI currently reports as focused. `SurfaceWrapper`
-    /// publishes this via `.focusedValue(\.ghosttySurfaceView, surfaceView)`;
-    /// reading it here lets us tell Bonsplit which pane is now active when
-    /// the user clicks into a surface.
-    @FocusedValue(\.ghosttySurfaceView) private var focusedSurface
 
     var body: some View {
         Ghostty.SurfaceWrapper(surfaceView: surface, isSplit: true)
-            // Push AppKit first-responder into our surface when the user
-            // clicks a different Bonsplit tab. Without this, tab-bar clicks
-            // change selection but the old tab's surface keeps keyboard
-            // focus (see note above about didSelectTab not firing).
             .onChange(of: isSelected) { _, nowSelected in
                 if nowSelected {
                     Ghostty.moveFocus(to: surface)
                 }
             }
-            // When SwiftUI focus lands on this tab's surface (via click or
-            // tab switch), update Bonsplit's focused pane so subsequent
-            // splits / closes target the correct pane.
-            .onChange(of: focusedSurface) { _, newFocus in
-                guard let newFocus, newFocus === surface else { return }
-                state.controller.focusPane(paneId)
-            }
+            // Important: no SwiftUI TapGesture here.
+            //
+            // In nested split layouts the wrapper gesture proved unreliable:
+            // the terminal under the mouse could gain AppKit focus while a
+            // sibling wrapper received the SwiftUI tap event. Boo now syncs
+            // Bonsplit pane focus from `SurfaceView.focusDidChange(_:)`, i.e.
+            // from the actual NSView that became first responder.
     }
 }
 

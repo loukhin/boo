@@ -228,7 +228,11 @@ public final class BonsplitController {
         // Find new pane (will be focused after split)
         let newPaneId = focusedPaneId!
 
-        // Notify delegate
+        // Surface the focus change explicitly as part of the public API.
+        // Internal split logic focuses the new pane, but hosts like Boo sync
+        // terminal first-responder from delegate callbacks, not by observing
+        // internal controller mutations directly.
+        delegate?.splitTabBar(self, didFocusPane: newPaneId)
         delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
 
         // Notify geometry change after a brief delay to allow layout
@@ -286,6 +290,24 @@ public final class BonsplitController {
         internalController.navigateFocus(direction: direction)
         if let focusedPaneId {
             delegate?.splitTabBar(self, didFocusPane: focusedPaneId)
+        }
+    }
+
+    /// Move a tab from one pane to another and surface the resulting focus /
+    /// selected-tab change through the delegate so hosts can sync embedded
+    /// content focus (e.g. Boo pushing first responder into the moved terminal).
+    public func moveTab(_ tab: Tab, from sourcePaneId: PaneID, to targetPaneId: PaneID, atIndex index: Int? = nil) {
+        let panesBefore = Set(internalController.rootNode.allPaneIds.map { $0.id })
+
+        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        internalController.moveTab(internalTab, from: sourcePaneId, to: targetPaneId, atIndex: index)
+
+        delegate?.splitTabBar(self, didFocusPane: targetPaneId)
+        delegate?.splitTabBar(self, didSelectTab: tab, inPane: targetPaneId)
+
+        let panesAfter = Set(internalController.rootNode.allPaneIds.map { $0.id })
+        for removed in panesBefore.subtracting(panesAfter) {
+            delegate?.splitTabBar(self, didClosePane: PaneID(id: removed))
         }
     }
 

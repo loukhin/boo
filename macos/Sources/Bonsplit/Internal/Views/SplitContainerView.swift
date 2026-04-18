@@ -63,33 +63,39 @@ struct SplitContainerView<Content: View, EmptyContent: View>: View {
             let rightRect = rightRect(for: size, leftRect: leftRect)
             let splitterCenter = splitterPoint(for: size, leftRect: leftRect)
 
-            ZStack(alignment: .topLeading) {
-                SplitNodeView(
-                    node: splitState.first,
-                    contentBuilder: contentBuilder,
-                    emptyPaneBuilder: emptyPaneBuilder,
-                    showSplitButtons: showSplitButtons,
-                    contentViewLifecycle: contentViewLifecycle,
-                    onGeometryChange: onGeometryChange,
-                    onDividerDragEnd: onDividerDragEnd
-                )
-                .environment(controller)
-                .frame(width: leftRect.width, height: leftRect.height)
-                .offset(x: leftRect.origin.x, y: leftRect.origin.y)
-
-                SplitNodeView(
-                    node: splitState.second,
-                    contentBuilder: contentBuilder,
-                    emptyPaneBuilder: emptyPaneBuilder,
-                    showSplitButtons: showSplitButtons,
-                    contentViewLifecycle: contentViewLifecycle,
-                    onGeometryChange: onGeometryChange,
-                    onDividerDragEnd: onDividerDragEnd
-                )
-                .environment(controller)
-                .frame(width: rightRect.width, height: rightRect.height)
-                .offset(x: rightRect.origin.x, y: rightRect.origin.y)
-
+            // We deliberately use HStack / VStack instead of ZStack +
+            // `.offset` here. `.offset` only shifts rendering, not the
+            // view's layout frame, so children of a ZStack whose offset
+            // puts them side-by-side still share an origin-anchored
+            // layout frame. That means their *hit-test* regions overlap:
+            // clicking a nested-pane surface could hit either sibling,
+            // and SwiftUI's resolution isn't always stable across
+            // re-renders. With deep splits this manifests as focus
+            // oscillating between two adjacent panes on click.
+            //
+            // HStack/VStack places children with real, non-overlapping
+            // layout bounds, which fixes hit testing and makes focus
+            // routing deterministic. The divider then sits in an
+            // `.overlay` layer positioned precisely between them.
+            Group {
+                switch splitState.orientation {
+                case .horizontal:
+                    HStack(spacing: 0) {
+                        firstNode
+                            .frame(width: leftRect.width)
+                        secondNode
+                            .frame(width: rightRect.width)
+                    }
+                case .vertical:
+                    VStack(spacing: 0) {
+                        firstNode
+                            .frame(height: leftRect.height)
+                        secondNode
+                            .frame(height: rightRect.height)
+                    }
+                }
+            }
+            .overlay(
                 divider(in: size)
                     .position(splitterCenter)
                     .gesture(dragGesture(in: size))
@@ -101,9 +107,37 @@ struct SplitContainerView<Content: View, EmptyContent: View>: View {
                             splitState.dividerPosition = 0.5
                         }
                     }
-            }
+            )
             .onAppear { runEntryAnimationIfNeeded() }
         }
+    }
+
+    // MARK: - Children
+
+    private var firstNode: some View {
+        SplitNodeView(
+            node: splitState.first,
+            contentBuilder: contentBuilder,
+            emptyPaneBuilder: emptyPaneBuilder,
+            showSplitButtons: showSplitButtons,
+            contentViewLifecycle: contentViewLifecycle,
+            onGeometryChange: onGeometryChange,
+            onDividerDragEnd: onDividerDragEnd
+        )
+        .environment(controller)
+    }
+
+    private var secondNode: some View {
+        SplitNodeView(
+            node: splitState.second,
+            contentBuilder: contentBuilder,
+            emptyPaneBuilder: emptyPaneBuilder,
+            showSplitButtons: showSplitButtons,
+            contentViewLifecycle: contentViewLifecycle,
+            onGeometryChange: onGeometryChange,
+            onDividerDragEnd: onDividerDragEnd
+        )
+        .environment(controller)
     }
 
     // MARK: - Divider

@@ -27,8 +27,10 @@ enum DropZone: Equatable {
 
 /// Container for a single pane with its tab bar and content area
 struct PaneContainerView<Content: View, EmptyContent: View>: View {
+    @Environment(BonsplitController.self) private var bonsplitController
+    @Environment(SplitViewController.self) private var controller
+
     @Bindable var pane: PaneState
-    let controller: SplitViewController
     let contentBuilder: (TabItem, PaneID) -> Content
     let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
@@ -36,16 +38,11 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
 
     @State private var activeDropZone: DropZone?
 
-    private var isFocused: Bool {
-        controller.focusedPaneId == pane.id
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             // Tab bar
             TabBarView(
                 pane: pane,
-                isFocused: isFocused,
                 showSplitButtons: showSplitButtons
             )
 
@@ -112,14 +109,19 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
 
     @ViewBuilder
     private func dropZonesLayer(size: CGSize) -> some View {
-        // Single unified drop zone that determines zone based on position
+        // Single unified drop zone that determines zone based on position.
+        //
+        // Important: do NOT attach a tap handler here. This layer sits above
+        // the pane content, and for AppKit-backed terminal surfaces that can
+        // create confusing click-routing where the transparent overlay, the
+        // terminal NSView, and any per-surface SwiftUI gesture all compete for
+        // the same click. Keep this layer drop-only so surface clicks are owned
+        // by the surface host instead of by an invisible full-pane overlay.
         Color.clear
-            .onTapGesture {
-                controller.focusPane(pane.id)
-            }
             .onDrop(of: [.text], delegate: UnifiedPaneDropDelegate(
                 size: size,
                 pane: pane,
+                bonsplitController: bonsplitController,
                 controller: controller,
                 activeDropZone: $activeDropZone
             ))
@@ -175,6 +177,7 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
 struct UnifiedPaneDropDelegate: DropDelegate {
     let size: CGSize
     let pane: PaneState
+    let bonsplitController: BonsplitController
     let controller: SplitViewController
     @Binding var activeDropZone: DropZone?
 
@@ -240,7 +243,12 @@ struct UnifiedPaneDropDelegate: DropDelegate {
                 if zone == .center {
                     // Drop in center - move tab to this pane
                     withAnimation(.spring(duration: 0.3, bounce: 0.15)) {
-                        controller.moveTab(transfer.tab, from: sourcePaneId, to: pane.id, atIndex: nil)
+                        bonsplitController.moveTab(
+                            Tab(from: transfer.tab),
+                            from: sourcePaneId,
+                            to: pane.id,
+                            atIndex: nil
+                        )
                     }
                 } else if let orientation = zone.orientation {
                     // Drop on edge - create a split. SplitContainerView will
@@ -263,6 +271,17 @@ struct UnifiedPaneDropDelegate: DropDelegate {
                         tab: transfer.tab,
                         insertFirst: zone.insertsFirst
                     )
+
+                    // Mirror the internal focus/selection change through the
+                    // public delegate path so hosts can sync embedded content.
+                    if let newPaneId = controller.focusedPaneId {
+                        bonsplitController.delegate?.splitTabBar(bonsplitController, didFocusPane: newPaneId)
+                        bonsplitController.delegate?.splitTabBar(
+                            bonsplitController,
+                            didSelectTab: Tab(from: transfer.tab),
+                            inPane: newPaneId
+                        )
+                    }
                 }
             }
         }

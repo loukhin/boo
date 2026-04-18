@@ -10,10 +10,16 @@ enum TabBarMetrics {
     // MARK: - Individual Tabs
 
     static let tabHeight: CGFloat = 32
-    static let tabMinWidth: CGFloat = 140
+    static let tabMinWidth: CGFloat = 80
     static let tabMaxWidth: CGFloat = 220
+    /// Max width for the title text itself. Long shell-reported titles
+    /// truncate at this width so tabs don't grow indefinitely.
+    static let tabTitleMaxWidth: CGFloat = 180
     static let tabCornerRadius: CGFloat = 0
     static let tabHorizontalPadding: CGFloat = 12
+    /// Trailing-side padding — intentionally tighter than leading to keep
+    /// the close button close to the tab edge.
+    static let tabTrailingPadding: CGFloat = 4
     static let tabSpacing: CGFloat = 0
     static let activeIndicatorHeight: CGFloat = 2
 
