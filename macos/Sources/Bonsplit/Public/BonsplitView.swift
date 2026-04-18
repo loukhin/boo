@@ -21,18 +21,25 @@ public struct BonsplitView<Content: View, EmptyContent: View>: View {
     @Bindable private var controller: BonsplitController
     private let contentBuilder: (Tab, PaneID) -> Content
     private let emptyPaneBuilder: (PaneID) -> EmptyContent
+    private let onDividerDragEnd: (() -> Void)?
 
     /// Initialize with a controller, content builder, and empty pane builder
     /// - Parameters:
     ///   - controller: The BonsplitController managing the tab state
+    ///   - onDividerDragEnd: Called once after the user finishes dragging a
+    ///     split divider. Hosts whose pane content loses first-responder
+    ///     during the drag (e.g., embedded AppKit views with their own
+    ///     tracking areas) can use this hook to restore focus.
     ///   - content: A ViewBuilder closure that provides content for each tab. Receives the tab and pane ID.
     ///   - emptyPane: A ViewBuilder closure that provides content for empty panes
     public init(
         controller: BonsplitController,
+        onDividerDragEnd: (() -> Void)? = nil,
         @ViewBuilder content: @escaping (Tab, PaneID) -> Content,
         @ViewBuilder emptyPane: @escaping (PaneID) -> EmptyContent
     ) {
         self.controller = controller
+        self.onDividerDragEnd = onDividerDragEnd
         self.contentBuilder = content
         self.emptyPaneBuilder = emptyPane
     }
@@ -49,7 +56,8 @@ public struct BonsplitView<Content: View, EmptyContent: View>: View {
             contentViewLifecycle: controller.configuration.contentViewLifecycle,
             onGeometryChange: { [weak controller] isDragging in
                 controller?.notifyGeometryChange(isDragging: isDragging)
-            }
+            },
+            onDividerDragEnd: onDividerDragEnd
         )
         .environment(controller)
         .environment(controller.internalController)
@@ -62,12 +70,16 @@ extension BonsplitView where EmptyContent == DefaultEmptyPaneView {
     /// Initialize with a controller and content builder, using the default empty pane view
     /// - Parameters:
     ///   - controller: The BonsplitController managing the tab state
+    ///   - onDividerDragEnd: Called once after the user finishes dragging a
+    ///     split divider. See the main initializer for details.
     ///   - content: A ViewBuilder closure that provides content for each tab. Receives the tab and pane ID.
     public init(
         controller: BonsplitController,
+        onDividerDragEnd: (() -> Void)? = nil,
         @ViewBuilder content: @escaping (Tab, PaneID) -> Content
     ) {
         self.controller = controller
+        self.onDividerDragEnd = onDividerDragEnd
         self.contentBuilder = content
         self.emptyPaneBuilder = { _ in DefaultEmptyPaneView() }
     }

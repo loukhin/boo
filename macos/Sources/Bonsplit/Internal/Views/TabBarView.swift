@@ -184,7 +184,6 @@ struct TabBarView: View {
     private var splitButtons: some View {
         HStack(spacing: 4) {
             Button {
-                // 120fps animation handled by SplitAnimator
                 controller.splitPane(pane.id, orientation: .horizontal)
             } label: {
                 Image(systemName: "square.split.2x1")
@@ -194,7 +193,6 @@ struct TabBarView: View {
             .help("Split Right")
 
             Button {
-                // 120fps animation handled by SplitAnimator
                 controller.splitPane(pane.id, orientation: .vertical)
             } label: {
                 Image(systemName: "square.split.1x2")

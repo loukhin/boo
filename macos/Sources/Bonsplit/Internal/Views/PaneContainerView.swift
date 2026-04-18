@@ -243,7 +243,9 @@ struct UnifiedPaneDropDelegate: DropDelegate {
                         controller.moveTab(transfer.tab, from: sourcePaneId, to: pane.id, atIndex: nil)
                     }
                 } else if let orientation = zone.orientation {
-                    // Drop on edge - create a split (120fps animation handled by SplitAnimator)
+                    // Drop on edge - create a split. SplitContainerView will
+                    // render the new split in place; entry animation is
+                    // currently a no-op (see runEntryAnimationIfNeeded).
                     // Remove tab from source first
                     if let sourcePane = controller.rootNode.findPane(sourcePaneId) {
                         sourcePane.removeTab(transfer.tab.id)

@@ -19,7 +19,16 @@ struct BooRootView: View {
     @ObservedObject var state: BooState
 
     var body: some View {
-        BonsplitView(controller: state.controller) { tab, paneId in
+        BonsplitView(
+            controller: state.controller,
+            // During a divider drag the SwiftUI gesture steals first-responder
+            // from whichever ghostty surface currently had it (the surface's
+            // tracking areas see the drag as a mouse event in a different
+            // view). We can't keep focus *through* the drag without deeper
+            // surface-level surgery, so we just push it back when the drag
+            // ends — same net result from the user's perspective.
+            onDividerDragEnd: { [weak state] in state?.focusCurrentTabSurface() }
+        ) { tab, paneId in
             // Computed here so the body re-evaluates when Bonsplit's
             // PaneState (@Published selectedTabId) changes — that's our
             // hook for "user clicked a tab in the tab bar", since
@@ -34,12 +43,12 @@ struct BooRootView: View {
                     paneId: paneId,
                     state: state
                 )
-                // The `layoutEpoch` is bumped after any pane close so that
-                // surviving containers get a fresh SwiftUI identity and
-                // force-remount. This is how we recover from Bonsplit's
-                // split-tree collapse orphaning the surface's NSView —
-                // the new mount re-runs makeOSView and re-parents cleanly.
-                .id("\(ObjectIdentifier(surface).hashValue)-\(state.layoutEpoch)")
+                // Identity keyed on the surface itself so SwiftUI preserves
+                // the representable across tab/pane reparenting. Bonsplit's
+                // split-tree is now pure SwiftUI, so reshaping doesn't tear
+                // down the NSView subtree and we no longer need to force a
+                // remount on pane close.
+                .id(ObjectIdentifier(surface).hashValue)
             } else {
                 BooTabPlaceholder(title: tab.title)
             }

@@ -9,6 +9,7 @@ struct SplitViewContainer<Content: View, EmptyContent: View>: View {
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
     var onGeometryChange: ((_ isDragging: Bool) -> Void)?
+    var onDividerDragEnd: (() -> Void)?
 
     var body: some View {
         GeometryReader { geometry in
@@ -40,7 +41,8 @@ struct SplitViewContainer<Content: View, EmptyContent: View>: View {
             emptyPaneBuilder: emptyPaneBuilder,
             showSplitButtons: showSplitButtons,
             contentViewLifecycle: contentViewLifecycle,
-            onGeometryChange: onGeometryChange
+            onGeometryChange: onGeometryChange,
+            onDividerDragEnd: onDividerDragEnd
         )
     }
 }

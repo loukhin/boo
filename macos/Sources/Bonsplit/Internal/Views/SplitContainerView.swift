@@ -1,241 +1,259 @@
 import SwiftUI
 import AppKit
 
-/// SwiftUI wrapper around NSSplitView for native split behavior
-struct SplitContainerView<Content: View, EmptyContent: View>: NSViewRepresentable {
+/// Pure SwiftUI recursive split container.
+///
+/// Renders two children (pane or nested split) side-by-side (horizontal) or
+/// stacked (vertical) with a draggable divider in between.
+///
+/// ## Why pure SwiftUI instead of NSSplitView
+///
+/// The previous implementation wrapped an `NSSplitView` in an
+/// `NSViewRepresentable`. That worked, but had a nasty interaction with heavy
+/// `NSView` leaves (in Boo's case, ghostty's `SurfaceView` with its live
+/// Metal layer): when the split tree restructured (e.g., a nested split
+/// collapsed into a single pane), SwiftUI's reconciler tore down the
+/// `NSViewRepresentable` subtree and our surfaces lost their parent chain,
+/// causing a visible blank flash while Metal reattached.
+///
+/// By recursing in pure SwiftUI and letting the `NSViewRepresentable` boundary
+/// live only at the *leaf* (around `SurfaceView`), restructuring higher in the
+/// tree no longer tears down those leaves — their `NSView`s stay parented and
+/// Metal keeps drawing.
+///
+/// Layout is modeled after ghostty's `SplitView` (see
+/// `macos/Sources/Features/Splits/SplitView.swift`): a `GeometryReader` reads
+/// the container size, rect math converts the 0…1 `dividerPosition` into
+/// concrete frames for each child, and a draggable divider lives as a sibling
+/// in the same `ZStack`.
+struct SplitContainerView<Content: View, EmptyContent: View>: View {
     @Bindable var splitState: SplitState
     let controller: SplitViewController
     let contentBuilder: (TabItem, PaneID) -> Content
     let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
-    /// Callback when geometry changes. Bool indicates if change is during active divider drag.
+    /// Callback invoked when geometry changes. `isDragging` is true while the
+    /// user is actively dragging the divider, false otherwise.
     var onGeometryChange: ((_ isDragging: Bool) -> Void)?
+    /// Callback invoked once when the user finishes dragging the divider.
+    /// Used by hosts that need to restore focus to a child (e.g., Boo pushing
+    /// first-responder back into a ghostty surface after the drag steals it).
+    var onDividerDragEnd: (() -> Void)?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(splitState: splitState, onGeometryChange: onGeometryChange)
-    }
+    /// Whether the entry animation has already run for this split. Using
+    /// `@State` ensures we only slide in once per view lifetime.
+    @State private var didRunEntryAnimation = false
+    @State private var isDragging = false
 
-    func makeNSView(context: Context) -> NSSplitView {
-        let splitView = NSSplitView()
-        splitView.isVertical = splitState.orientation == .horizontal
-        splitView.dividerStyle = .thin
-        splitView.delegate = context.coordinator
+    // Divider sizing. The visible line is 1pt (matching NSSplitView `.thin`);
+    // the invisible grab area around it widens the hitbox so the divider is
+    // easy to grab without growing the visual thickness. ghostty uses 6pt of
+    // padding; we use more because Boo's surfaces aggressively capture mouse
+    // events (tracking areas for text selection / URL hover), which eats into
+    // the effective hit area near the divider edge.
+    private let visibleThickness: CGFloat = TabBarMetrics.dividerThickness
+    private let invisiblePadding: CGFloat = 10
+    private var hitboxThickness: CGFloat { visibleThickness + invisiblePadding }
 
-        // First child
-        let firstHosting = makeHostingView(for: splitState.first)
-        splitView.addArrangedSubview(firstHosting)
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let leftRect = leftRect(for: size)
+            let rightRect = rightRect(for: size, leftRect: leftRect)
+            let splitterCenter = splitterPoint(for: size, leftRect: leftRect)
 
-        // Second child
-        let secondHosting = makeHostingView(for: splitState.second)
-        splitView.addArrangedSubview(secondHosting)
+            ZStack(alignment: .topLeading) {
+                SplitNodeView(
+                    node: splitState.first,
+                    contentBuilder: contentBuilder,
+                    emptyPaneBuilder: emptyPaneBuilder,
+                    showSplitButtons: showSplitButtons,
+                    contentViewLifecycle: contentViewLifecycle,
+                    onGeometryChange: onGeometryChange,
+                    onDividerDragEnd: onDividerDragEnd
+                )
+                .environment(controller)
+                .frame(width: leftRect.width, height: leftRect.height)
+                .offset(x: leftRect.origin.x, y: leftRect.origin.y)
 
-        context.coordinator.splitView = splitView
+                SplitNodeView(
+                    node: splitState.second,
+                    contentBuilder: contentBuilder,
+                    emptyPaneBuilder: emptyPaneBuilder,
+                    showSplitButtons: showSplitButtons,
+                    contentViewLifecycle: contentViewLifecycle,
+                    onGeometryChange: onGeometryChange,
+                    onDividerDragEnd: onDividerDragEnd
+                )
+                .environment(controller)
+                .frame(width: rightRect.width, height: rightRect.height)
+                .offset(x: rightRect.origin.x, y: rightRect.origin.y)
 
-        // Capture animation origin before it gets cleared
-        let animationOrigin = splitState.animationOrigin
-
-        // Determine which pane is new (will be hidden initially)
-        let newPaneIndex = animationOrigin == .fromFirst ? 0 : 1
-
-        if animationOrigin != nil {
-            // Clear immediately so we don't re-animate on updates
-            splitState.animationOrigin = nil
-
-            // Hide the NEW pane immediately to prevent flash
-            splitView.arrangedSubviews[newPaneIndex].isHidden = true
-
-            // Track that we're animating (skip delegate position updates)
-            context.coordinator.isAnimating = true
-        }
-
-        // Wait for view to be added to window
-        DispatchQueue.main.async {
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
-
-            guard totalSize > 0 else { return }
-
-            if animationOrigin != nil {
-                // Position at edge while new pane is hidden
-                let startPosition: CGFloat = animationOrigin == .fromFirst ? 0 : totalSize
-                splitView.setPosition(startPosition, ofDividerAt: 0)
-                splitView.layoutSubtreeIfNeeded()
-
-                let targetPosition = totalSize * 0.5
-                splitState.dividerPosition = 0.5
-
-                // Wait for layout
-                DispatchQueue.main.async {
-                    // Show the new pane and animate
-                    splitView.arrangedSubviews[newPaneIndex].isHidden = false
-
-                    SplitAnimator.shared.animate(
-                        splitView: splitView,
-                        from: startPosition,
-                        to: targetPosition
-                    ) {
-                        context.coordinator.isAnimating = false
+                divider(in: size)
+                    .position(splitterCenter)
+                    .gesture(dragGesture(in: size))
+                    .onTapGesture(count: 2) {
+                        // NSSplitView had no built-in equalize; this matches
+                        // ghostty's SplitView behavior and is a common UX
+                        // convention.
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            splitState.dividerPosition = 0.5
+                        }
                     }
-                }
-            } else {
-                // No animation - just set the position
-                let position = totalSize * splitState.dividerPosition
-                splitView.setPosition(position, ofDividerAt: 0)
             }
-        }
-
-        return splitView
-    }
-
-    func updateNSView(_ splitView: NSSplitView, context: Context) {
-        // Update orientation if changed
-        splitView.isVertical = splitState.orientation == .horizontal
-
-        // Update children
-        let subviews = splitView.arrangedSubviews
-        if subviews.count >= 2 {
-            updateHostingView(subviews[0], for: splitState.first)
-            updateHostingView(subviews[1], for: splitState.second)
-        }
-
-        // Access dividerPosition to ensure SwiftUI tracks this dependency
-        // Then sync if the position changed externally
-        let currentPosition = splitState.dividerPosition
-        context.coordinator.syncPosition(currentPosition, in: splitView)
-    }
-
-    // MARK: - Helpers
-
-    private func makeHostingView(for node: SplitNode) -> NSView {
-        let hostingController = NSHostingController(rootView: AnyView(makeView(for: node)))
-        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        return hostingController.view
-    }
-
-    private func updateHostingView(_ view: NSView, for node: SplitNode) {
-        // Find the hosting controller's view and update it
-        if let hostingView = view as? NSHostingView<AnyView> {
-            hostingView.rootView = AnyView(makeView(for: node))
+            .onAppear { runEntryAnimationIfNeeded() }
         }
     }
 
+    // MARK: - Divider
+
+    /// Divider needs explicit sizing on BOTH axes because it's positioned
+    /// absolutely inside a `ZStack` via `.position`, which strips parent size
+    /// proposals. Using `nil` for the long axis leaves the inner `Rectangle`
+    /// without a height and it collapses to zero, making the divider
+    /// invisible. We pull the long axis from the `GeometryReader`.
     @ViewBuilder
-    private func makeView(for node: SplitNode) -> some View {
-        switch node {
-        case .pane(let paneState):
-            PaneContainerView(
-                pane: paneState,
-                controller: controller,
-                contentBuilder: contentBuilder,
-                emptyPaneBuilder: emptyPaneBuilder,
-                showSplitButtons: showSplitButtons,
-                contentViewLifecycle: contentViewLifecycle
-            )
-        case .split(let nestedSplitState):
-            SplitContainerView(
-                splitState: nestedSplitState,
-                controller: controller,
-                contentBuilder: contentBuilder,
-                emptyPaneBuilder: emptyPaneBuilder,
-                showSplitButtons: showSplitButtons,
-                contentViewLifecycle: contentViewLifecycle,
-                onGeometryChange: onGeometryChange
-            )
+    private func divider(in size: CGSize) -> some View {
+        let isHorizontal = splitState.orientation == .horizontal
+        let longAxis = isHorizontal ? size.height : size.width
+
+        ZStack {
+            // Invisible hitbox: wider than the visible line so the divider is
+            // easy to grab without bloating the visual. `.contentShape`
+            // ensures the transparent rect is hit-testable.
+            Color.clear
+                .frame(
+                    width: isHorizontal ? hitboxThickness : longAxis,
+                    height: isHorizontal ? longAxis : hitboxThickness
+                )
+                .contentShape(Rectangle())
+            // Visible 1pt line.
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(
+                    width: isHorizontal ? visibleThickness : longAxis,
+                    height: isHorizontal ? longAxis : visibleThickness
+                )
         }
+        // Use ghostty's Backport helper so we get the declarative
+        // `pointerStyle` API on macOS 15+ and a no-op on older macOS. We
+        // deliberately avoid `NSCursor.push/pop` here: the global cursor
+        // stack is shared with `SurfaceView`, which pushes its own IBeam
+        // cursor for text selection. Popping when hover ends can corrupt
+        // that stack, leaving the terminal with an arrow cursor instead of
+        // IBeam and flashing the wrong cursor while dragging the divider.
+        //
+        // Boo's deployment target is macOS 15+, so the backport's pre-15
+        // fallback (no-op) is fine in practice; the divider just won't
+        // change the cursor on <15.
+        .backport.pointerStyle(isHorizontal ? .resizeLeftRight : .resizeUpDown)
     }
 
-    // MARK: - Coordinator
+    // MARK: - Drag gesture
 
-    class Coordinator: NSObject, NSSplitViewDelegate {
-        let splitState: SplitState
-        weak var splitView: NSSplitView?
-        var isAnimating = false
-        var onGeometryChange: ((_ isDragging: Bool) -> Void)?
-        /// Track last applied position to detect external changes
-        var lastAppliedPosition: CGFloat = 0.5
-        /// Track if user is actively dragging the divider
-        var isDragging = false
+    private func dragGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { gesture in
+                if !isDragging {
+                    isDragging = true
+                }
+                let minPane: CGFloat
+                let total: CGFloat
+                let location: CGFloat
 
-        init(splitState: SplitState, onGeometryChange: ((_ isDragging: Bool) -> Void)?) {
-            self.splitState = splitState
-            self.onGeometryChange = onGeometryChange
-            self.lastAppliedPosition = splitState.dividerPosition
-        }
-
-        /// Apply external position changes to the NSSplitView
-        func syncPosition(_ statePosition: CGFloat, in splitView: NSSplitView) {
-            guard !isAnimating else { return }
-
-            // Check if position changed externally (not from user drag)
-            if abs(statePosition - lastAppliedPosition) > 0.01 {
-                let totalSize = splitState.orientation == .horizontal
-                    ? splitView.bounds.width
-                    : splitView.bounds.height
-
-                guard totalSize > 0 else { return }
-
-                let pixelPosition = totalSize * statePosition
-                splitView.setPosition(pixelPosition, ofDividerAt: 0)
-                splitView.layoutSubtreeIfNeeded()
-                lastAppliedPosition = statePosition
-            }
-        }
-
-        func splitViewWillResizeSubviews(_ notification: Notification) {
-            // Detect if this is a user drag by checking mouse state
-            if let event = NSApp.currentEvent, event.type == .leftMouseDragged {
-                isDragging = true
-            }
-        }
-
-        func splitViewDidResizeSubviews(_ notification: Notification) {
-            // Skip position updates during animation
-            guard !isAnimating else { return }
-            guard let splitView = notification.object as? NSSplitView else { return }
-
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
-
-            guard totalSize > 0 else { return }
-
-            if let firstSubview = splitView.arrangedSubviews.first {
-                let dividerPosition = splitState.orientation == .horizontal
-                    ? firstSubview.frame.width
-                    : firstSubview.frame.height
-
-                let normalizedPosition = dividerPosition / totalSize
-
-                // Check if drag ended (mouse up)
-                let wasDragging = isDragging
-                if let event = NSApp.currentEvent, event.type == .leftMouseUp {
-                    isDragging = false
+                switch splitState.orientation {
+                case .horizontal:
+                    minPane = TabBarMetrics.minimumPaneWidth
+                    total = size.width
+                    location = gesture.location.x
+                case .vertical:
+                    minPane = TabBarMetrics.minimumPaneHeight
+                    total = size.height
+                    location = gesture.location.y
                 }
 
-                Task { @MainActor in
-                    self.splitState.dividerPosition = normalizedPosition
-                    self.lastAppliedPosition = normalizedPosition
-                    // Notify geometry change with drag state
-                    self.onGeometryChange?(wasDragging)
-                }
+                guard total > 0 else { return }
+                let clamped = max(minPane, min(location, total - minPane))
+                splitState.dividerPosition = clamped / total
+                onGeometryChange?(true)
             }
-        }
+            .onEnded { _ in
+                isDragging = false
+                onGeometryChange?(false)
+                onDividerDragEnd?()
+            }
+    }
 
-        func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-            // Allow edge positions during animation
-            guard !isAnimating else { return proposedMinimumPosition }
-            return max(proposedMinimumPosition, TabBarMetrics.minimumPaneWidth)
-        }
+    // MARK: - Entry animation
 
-        func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
-            // Allow edge positions during animation
-            guard !isAnimating else { return proposedMaximumPosition }
-            let totalSize = splitState.orientation == .horizontal
-                ? splitView.bounds.width
-                : splitView.bounds.height
-            return min(proposedMaximumPosition, totalSize - TabBarMetrics.minimumPaneWidth)
+    /// Normalize a freshly-created split to its resting position.
+    ///
+    /// `SplitViewController` creates new splits with `dividerPosition` set to
+    /// `0.0` or `1.0` (the edge) together with an `animationOrigin`, on the
+    /// assumption that the view layer will animate the divider from that edge
+    /// to a visible position. The previous NSSplitView-backed view did this
+    /// by ignoring the controller's `dividerPosition` value entirely and
+    /// hard-coding the target to `0.5` whenever an `animationOrigin` was
+    /// present.
+    ///
+    /// We preserve that behavior here: if the split was born with an
+    /// animation origin, snap the divider to `0.5` so both panes are visible.
+    /// The slide-in animation itself is deferred (see note below) — for now
+    /// new splits just pop into place at 50/50.
+    ///
+    /// An earlier version tried `dividerPosition = edge` then
+    /// `withAnimation { dividerPosition = 0.5 }` inside a
+    /// `DispatchQueue.main.async`, but SwiftUI coalesced the two writes into
+    /// a single transaction and the divider stayed pinned at the edge.
+    /// Reintroducing a real slide-in will likely need an explicit
+    /// `Animatable` wrapper or a two-phase `.task` that awaits a frame
+    /// between mutations.
+    private func runEntryAnimationIfNeeded() {
+        guard !didRunEntryAnimation else { return }
+        didRunEntryAnimation = true
+
+        guard splitState.animationOrigin != nil else { return }
+        splitState.animationOrigin = nil
+        splitState.dividerPosition = 0.5
+    }
+
+    // MARK: - Rect math
+    //
+    // Same scheme as ghostty's SplitView: allocate the first child based on
+    // the fraction, subtract half the divider thickness so the divider sits
+    // centered on the boundary, and give the rest to the second child.
+
+    private func leftRect(for size: CGSize) -> CGRect {
+        var rect = CGRect(origin: .zero, size: size)
+        switch splitState.orientation {
+        case .horizontal:
+            rect.size.width = max(0, size.width * splitState.dividerPosition - visibleThickness / 2)
+        case .vertical:
+            rect.size.height = max(0, size.height * splitState.dividerPosition - visibleThickness / 2)
+        }
+        return rect
+    }
+
+    private func rightRect(for size: CGSize, leftRect: CGRect) -> CGRect {
+        var rect = CGRect(origin: .zero, size: size)
+        switch splitState.orientation {
+        case .horizontal:
+            rect.origin.x = leftRect.width + visibleThickness / 2
+            rect.size.width = max(0, size.width - rect.origin.x)
+        case .vertical:
+            rect.origin.y = leftRect.height + visibleThickness / 2
+            rect.size.height = max(0, size.height - rect.origin.y)
+        }
+        return rect
+    }
+
+    private func splitterPoint(for size: CGSize, leftRect: CGRect) -> CGPoint {
+        switch splitState.orientation {
+        case .horizontal:
+            return CGPoint(x: leftRect.width + visibleThickness / 2, y: size.height / 2)
+        case .vertical:
+            return CGPoint(x: size.width / 2, y: leftRect.height + visibleThickness / 2)
         }
     }
 }

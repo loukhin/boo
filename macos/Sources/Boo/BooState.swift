@@ -28,17 +28,6 @@ final class BooState: ObservableObject {
     /// heavy NSView with a live PTY + child process.
     @Published var surfaces: [TabID: Ghostty.SurfaceView] = [:]
 
-    /// Version counter bumped whenever the layout tree restructures in a
-    /// way that risks detaching surfaces from their parent NSView chain
-    /// (currently: pane closes, which trigger Bonsplit's split-collapse).
-    /// SwiftUI view identities in `BooRootView` include this epoch so the
-    /// affected containers force a clean re-mount, letting
-    /// `Ghostty.SurfaceRepresentable.makeOSView` run again and properly
-    /// re-parent the surface via `documentView.addSubview(surfaceView)`.
-    ///
-    /// See also the SplitContainerView bug report in the BooState notes.
-    @Published var layoutEpoch: Int = 0
-
     private var tabCounter = 0
 
     init(ghostty: Ghostty.App) {
@@ -253,17 +242,15 @@ extension BooState: BonsplitDelegate {
 
     /// Called when Bonsplit actually destroys a pane (last tab in the
     /// pane closed and other panes exist, so the split tree collapses).
-    /// This is the only close path that orphans surviving surfaces from
-    /// their NSView chain — and so the only one that needs the SwiftUI
-    /// re-mount + focus push.
+    /// After the collapse, SwiftUI reparents the surviving surface; we just
+    /// need to push AppKit focus into the newly-active pane's surface since
+    /// Bonsplit only flips its own focused-pane state.
     func splitTabBar(
         _ controller: BonsplitController,
         didClosePane paneId: PaneID
     ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.layoutEpoch &+= 1
-            self.focusCurrentTabSurface()
+            self?.focusCurrentTabSurface()
         }
     }
 
