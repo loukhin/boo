@@ -351,9 +351,12 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            // Boo step 1: open a Bonsplit-based BooController instead of the
+            // normal TerminalController. TerminalController is still present
+            // and functional — only the first-launch default is swapped.
+            if TerminalController.all.isEmpty && BooController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                _ = BooController.newWindow(ghostty)
                 undoManager.enableUndoRegistration()
             }
         }
@@ -722,18 +725,19 @@ class AppDelegate: NSObject,
     }
 
     @objc private func ghosttyNewWindow(_ notification: Notification) {
-        let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
-        let config = configAny as? Ghostty.SurfaceConfiguration
-        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        // Boo: always open a Boo window. BooState handles ghosttyNewTab for
+        // existing Boo windows; ghosttyNewWindow is the "create a brand new
+        // window" intent, which in Boo means a new BooController.
+        _ = BooController.newWindow(ghostty)
     }
 
     @objc private func ghosttyNewTab(_ notification: Notification) {
-        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
-        guard let window = surfaceView.window else { return }
-
-        // We only want to listen to new tabs if the focused parent is
-        // a regular terminal controller.
-        guard window.windowController is TerminalController else { return }
+        // Boo: new-tab intent is handled entirely by BooState for Boo
+        // windows. If the originating surface is owned by a TerminalController
+        // (e.g. one still alive for some reason), fall back to the old path.
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView,
+              let window = surfaceView.window,
+              window.windowController is TerminalController else { return }
 
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
@@ -960,14 +964,19 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        _ = TerminalController.newWindow(ghostty)
+        // Boo: menu File > New Window opens a Boo window.
+        _ = BooController.newWindow(ghostty)
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        _ = TerminalController.newTab(
-            ghostty,
-            from: TerminalController.preferredParent?.window
-        )
+        // Boo: menu File > New Tab creates a Bonsplit tab in the key Boo
+        // window. If no Boo window is key, open a new Boo window instead.
+        if let state = BooController.all
+            .first(where: { $0.window?.isKeyWindow == true })?.state {
+            state.newTab()
+        } else {
+            _ = BooController.newWindow(ghostty)
+        }
     }
 
     @IBAction func closeAllWindows(_ sender: Any?) {

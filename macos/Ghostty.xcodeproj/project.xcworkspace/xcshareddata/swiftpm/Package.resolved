@@ -1,6 +1,15 @@
 {
-  "originHash" : "e721da7f9826abdffcb6185e886155efa2514bd6234475f1afa893e29eb258d6",
+  "originHash" : "3791aa97a965a776276221533032d53869cb6fadc43ec17e53f2856dfc12a4b1",
   "pins" : [
+    {
+      "identity" : "bonsplit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/almonk/bonsplit.git",
+      "state" : {
+        "revision" : "7c322f078c388438e4b7896a86c57598aa7e203d",
+        "version" : "1.1.1"
+      }
+    },
     {
       "identity" : "sparkle",
       "kind" : "remoteSourceControl",

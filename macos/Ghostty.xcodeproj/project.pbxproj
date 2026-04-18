@@ -26,6 +26,7 @@
 		A5985CE62C33060F00C57AD3 /* man in Resources */ = {isa = PBXBuildFile; fileRef = A5985CE52C33060F00C57AD3 /* man */; };
 		A5A1F8852A489D6800D1E8BC /* terminfo in Resources */ = {isa = PBXBuildFile; fileRef = A5A1F8842A489D6800D1E8BC /* terminfo */; };
 		A5B30539299BEAAB0047F10C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
+		BC8EE4072F93D07200B6A31D /* Bonsplit in Frameworks */ = {isa = PBXBuildFile; productRef = BC8EE4062F93D07200B6A31D /* Bonsplit */; };
 		FC5218FA2D10FFCE004C93E0 /* zsh in Resources */ = {isa = PBXBuildFile; fileRef = FC5218F92D10FFC7004C93E0 /* zsh */; };
 		FC9ABA9C2D0F53F80020D4C8 /* bash-completion in Resources */ = {isa = PBXBuildFile; fileRef = FC9ABA9B2D0F538D0020D4C8 /* bash-completion */; };
 /* End PBXBuildFile section */
@@ -302,6 +303,7 @@
 				A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */,
 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
+				BC8EE4072F93D07200B6A31D /* Bonsplit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -462,6 +464,7 @@
 			name = Ghostty;
 			packageProductDependencies = (
 				A51BFC262B30F1B800E92F16 /* Sparkle */,
+				BC8EE4062F93D07200B6A31D /* Bonsplit */,
 			);
 			productName = Ghostty;
 			productReference = A5B30531299BEAAA0047F10C /* Ghostty.app */;
@@ -528,6 +531,7 @@
 			mainGroup = A5B30528299BEAAA0047F10C;
 			packageReferences = (
 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				BC8EE4052F93D07200B6A31D /* XCRemoteSwiftPackageReference "bonsplit" */,
 			);
 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
 			projectDirPath = "";
@@ -775,7 +779,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty;
@@ -1172,7 +1176,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty.debug;
@@ -1227,7 +1231,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
 				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mitchellh.ghostty;
@@ -1429,6 +1433,14 @@
 				minimumVersion = 2.5.1;
 			};
 		};
+		BC8EE4052F93D07200B6A31D /* XCRemoteSwiftPackageReference "bonsplit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/almonk/bonsplit.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1436,6 +1448,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;
 			productName = Sparkle;
+		};
+		BC8EE4062F93D07200B6A31D /* Bonsplit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BC8EE4052F93D07200B6A31D /* XCRemoteSwiftPackageReference "bonsplit" */;
+			productName = Bonsplit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
