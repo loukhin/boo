@@ -65,8 +65,7 @@ struct TabBarView: View {
                                 .id(tab.id)
                         }
 
-                        // No separate end-of-strip spacer here; trailing drop
-                        // behavior is provided by the right-side overlay band.
+                        Spacer(minLength: splitButtonLaneWidth)
                     }
                     .padding(.horizontal, TabBarMetrics.barPadding)
                     .background(
