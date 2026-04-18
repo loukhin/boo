@@ -26,11 +26,10 @@ import AppKit
 /// the container size, rect math converts the 0…1 `dividerPosition` into
 /// concrete frames for each child, and a draggable divider lives as a sibling
 /// in the same `ZStack`.
-struct SplitContainerView<Content: View, EmptyContent: View>: View {
+struct SplitContainerView<Content: View>: View {
     @Bindable var splitState: SplitState
     let controller: SplitViewController
     let contentBuilder: (TabItem, PaneID) -> Content
-    let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
     /// Callback invoked when geometry changes. `isDragging` is true while the
@@ -118,7 +117,6 @@ struct SplitContainerView<Content: View, EmptyContent: View>: View {
         SplitNodeView(
             node: splitState.first,
             contentBuilder: contentBuilder,
-            emptyPaneBuilder: emptyPaneBuilder,
             showSplitButtons: showSplitButtons,
             contentViewLifecycle: contentViewLifecycle,
             onGeometryChange: onGeometryChange,
@@ -131,7 +129,6 @@ struct SplitContainerView<Content: View, EmptyContent: View>: View {
         SplitNodeView(
             node: splitState.second,
             contentBuilder: contentBuilder,
-            emptyPaneBuilder: emptyPaneBuilder,
             showSplitButtons: showSplitButtons,
             contentViewLifecycle: contentViewLifecycle,
             onGeometryChange: onGeometryChange,

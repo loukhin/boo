@@ -5,8 +5,9 @@ import SwiftUI
 @Observable
 @MainActor
 final class SplitViewController {
-    /// The root node of the split tree
-    var rootNode: SplitNode
+    /// The root node of the split tree. `nil` when no panes exist (e.g.,
+    /// before the first tab is created or after the last pane is closed).
+    var rootNode: SplitNode?
 
     /// Currently focused pane ID
     var focusedPaneId: PaneID?
@@ -30,28 +31,21 @@ final class SplitViewController {
     var onGeometryChange: (() -> Void)?
 
     init(rootNode: SplitNode? = nil) {
-        if let rootNode {
-            self.rootNode = rootNode
-        } else {
-            // Initialize with a single pane containing a welcome tab
-            let welcomeTab = TabItem(title: "Welcome", icon: "star")
-            let initialPane = PaneState(tabs: [welcomeTab])
-            self.rootNode = .pane(initialPane)
-            self.focusedPaneId = initialPane.id
-        }
+        self.rootNode = rootNode
+        self.focusedPaneId = rootNode?.allPaneIds.first
     }
 
     // MARK: - Focus Management
 
     /// Set focus to a specific pane
     func focusPane(_ paneId: PaneID) {
-        guard rootNode.findPane(paneId) != nil else { return }
+        guard rootNode?.findPane(paneId) != nil else { return }
         focusedPaneId = paneId
     }
 
     /// Get the currently focused pane state
     var focusedPane: PaneState? {
-        guard let focusedPaneId else { return nil }
+        guard let focusedPaneId, let rootNode else { return nil }
         return rootNode.findPane(focusedPaneId)
     }
 
@@ -59,8 +53,9 @@ final class SplitViewController {
 
     /// Split the specified pane in the given orientation
     func splitPane(_ paneId: PaneID, orientation: SplitOrientation, with newTab: TabItem? = nil) {
+        guard let currentRoot = rootNode else { return }
         rootNode = splitNodeRecursively(
-            node: rootNode,
+            node: currentRoot,
             targetPaneId: paneId,
             orientation: orientation,
             newTab: newTab
@@ -119,8 +114,9 @@ final class SplitViewController {
 
     /// Split a pane with a specific tab, optionally inserting the new pane first
     func splitPaneWithTab(_ paneId: PaneID, orientation: SplitOrientation, tab: TabItem, insertFirst: Bool) {
+        guard let currentRoot = rootNode else { return }
         rootNode = splitNodeWithTabRecursively(
-            node: rootNode,
+            node: currentRoot,
             targetPaneId: paneId,
             orientation: orientation,
             tab: tab,
@@ -189,23 +185,15 @@ final class SplitViewController {
         }
     }
 
-    /// Close a pane and collapse the split
+    /// Close a pane and collapse the split. If this is the last pane,
+    /// `rootNode` becomes `nil` and `focusedPaneId` is cleared.
     func closePane(_ paneId: PaneID) {
-        // Don't close the last pane
-        guard rootNode.allPaneIds.count > 1 else { return }
+        guard let currentRoot = rootNode else { return }
 
-        let (newRoot, siblingPaneId) = closePaneRecursively(node: rootNode, targetPaneId: paneId)
+        let (newRoot, siblingPaneId) = closePaneRecursively(node: currentRoot, targetPaneId: paneId)
 
-        if let newRoot {
-            rootNode = newRoot
-        }
-
-        // Focus the sibling or first available pane
-        if let siblingPaneId {
-            focusedPaneId = siblingPaneId
-        } else if let firstPane = rootNode.allPaneIds.first {
-            focusedPaneId = firstPane
-        }
+        rootNode = newRoot
+        focusedPaneId = siblingPaneId ?? newRoot?.allPaneIds.first
     }
 
     private func closePaneRecursively(
@@ -251,11 +239,20 @@ final class SplitViewController {
 
     // MARK: - Tab Operations
 
-    /// Add a tab to the focused pane (or specified pane)
+    /// Add a tab to the focused pane (or specified pane). If `rootNode` is
+    /// `nil`, a new pane is created to hold the tab.
     func addTab(_ tab: TabItem, toPane paneId: PaneID? = nil, atIndex index: Int? = nil) {
+        // Bootstrap: create initial pane if tree is empty
+        if rootNode == nil {
+            let newPane = PaneState(tabs: [tab])
+            rootNode = .pane(newPane)
+            focusedPaneId = newPane.id
+            return
+        }
+
         let targetPaneId = paneId ?? focusedPaneId
         guard let targetPaneId,
-              let pane = rootNode.findPane(targetPaneId) else { return }
+              let pane = rootNode?.findPane(targetPaneId) else { return }
 
         if let index {
             pane.insertTab(tab, at: index)
@@ -266,7 +263,8 @@ final class SplitViewController {
 
     /// Move a tab from one pane to another
     func moveTab(_ tab: TabItem, from sourcePaneId: PaneID, to targetPaneId: PaneID, atIndex index: Int? = nil) {
-        guard let sourcePane = rootNode.findPane(sourcePaneId),
+        guard let rootNode,
+              let sourcePane = rootNode.findPane(sourcePaneId),
               let targetPane = rootNode.findPane(targetPaneId) else { return }
 
         // Remove from source
@@ -282,20 +280,21 @@ final class SplitViewController {
         // Focus target pane
         focusPane(targetPaneId)
 
-        // If source pane is now empty and not the only pane, close it
-        if sourcePane.tabs.isEmpty && rootNode.allPaneIds.count > 1 {
+        // If source pane is now empty, close it
+        if sourcePane.tabs.isEmpty {
             closePane(sourcePaneId)
         }
     }
 
-    /// Close a tab in a specific pane
+    /// Close a tab in a specific pane. If the pane becomes empty, it is
+    /// destroyed (which may leave `rootNode` nil if it was the last pane).
     func closeTab(_ tabId: UUID, inPane paneId: PaneID) {
-        guard let pane = rootNode.findPane(paneId) else { return }
+        guard let pane = rootNode?.findPane(paneId) else { return }
 
         pane.removeTab(tabId)
 
-        // If pane is now empty and not the only pane, close it
-        if pane.tabs.isEmpty && rootNode.allPaneIds.count > 1 {
+        // Destroy empty panes unconditionally
+        if pane.tabs.isEmpty {
             closePane(paneId)
         }
     }
@@ -304,7 +303,8 @@ final class SplitViewController {
 
     /// Navigate focus to an adjacent pane based on spatial position
     func navigateFocus(direction: NavigationDirection) {
-        guard let currentPaneId = focusedPaneId else { return }
+        guard let currentPaneId = focusedPaneId,
+              let rootNode else { return }
 
         let allPaneBounds = rootNode.computePaneBounds()
         guard let currentBounds = allPaneBounds.first(where: { $0.paneId == currentPaneId })?.bounds else { return }
@@ -403,6 +403,7 @@ final class SplitViewController {
 
     /// Find a split state by its UUID
     func findSplit(_ splitId: UUID) -> SplitState? {
+        guard let rootNode else { return nil }
         return findSplitRecursively(in: rootNode, id: splitId)
     }
 
@@ -423,6 +424,7 @@ final class SplitViewController {
 
     /// Get all split states in the tree
     var allSplits: [SplitState] {
+        guard let rootNode else { return [] }
         return collectSplits(from: rootNode)
     }
 

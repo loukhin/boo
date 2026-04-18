@@ -1,11 +1,10 @@
 import SwiftUI
 
 /// Main container view that renders the entire split tree (internal implementation)
-struct SplitViewContainer<Content: View, EmptyContent: View>: View {
+struct SplitViewContainer<Content: View>: View {
     @Environment(SplitViewController.self) private var controller
-    
+
     let contentBuilder: (TabItem, PaneID) -> Content
-    let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
     var onGeometryChange: ((_ isDragging: Bool) -> Void)?
@@ -47,14 +46,15 @@ struct SplitViewContainer<Content: View, EmptyContent: View>: View {
 
     @ViewBuilder
     private var splitNodeContent: some View {
-        SplitNodeView(
-            node: controller.rootNode,
-            contentBuilder: contentBuilder,
-            emptyPaneBuilder: emptyPaneBuilder,
-            showSplitButtons: showSplitButtons,
-            contentViewLifecycle: contentViewLifecycle,
-            onGeometryChange: onGeometryChange,
-            onDividerDragEnd: onDividerDragEnd
-        )
+        if let rootNode = controller.rootNode {
+            SplitNodeView(
+                node: rootNode,
+                contentBuilder: contentBuilder,
+                showSplitButtons: showSplitButtons,
+                contentViewLifecycle: contentViewLifecycle,
+                onGeometryChange: onGeometryChange,
+                onDividerDragEnd: onDividerDragEnd
+            )
+        }
     }
 }

@@ -399,7 +399,7 @@ struct TabDropDelegate: DropDelegate {
                     }
                 } else {
                     // Different pane - transfer
-                    guard let sourcePaneId = controller.rootNode.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
+                    guard let sourcePaneId = controller.rootNode?.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
                         return
                     }
                     withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {

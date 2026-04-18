@@ -11,67 +11,22 @@ import SwiftUI
 ///         BonsplitView(controller: controller) { tab, paneId in
 ///             MyContentView(for: tab)
 ///                 .onTapGesture { controller.focusPane(paneId) }
-///         } emptyPane: { paneId in
-///             Text("Empty pane")
 ///         }
 ///     }
 /// }
 /// ```
-public struct BonsplitView<Content: View, EmptyContent: View>: View {
+public struct BonsplitView<Content: View>: View {
     @Bindable private var controller: BonsplitController
     private let contentBuilder: (Tab, PaneID) -> Content
-    private let emptyPaneBuilder: (PaneID) -> EmptyContent
     private let onDividerDragEnd: (() -> Void)?
 
-    /// Initialize with a controller, content builder, and empty pane builder
+    /// Initialize with a controller and content builder
     /// - Parameters:
     ///   - controller: The BonsplitController managing the tab state
     ///   - onDividerDragEnd: Called once after the user finishes dragging a
     ///     split divider. Hosts whose pane content loses first-responder
     ///     during the drag (e.g., embedded AppKit views with their own
     ///     tracking areas) can use this hook to restore focus.
-    ///   - content: A ViewBuilder closure that provides content for each tab. Receives the tab and pane ID.
-    ///   - emptyPane: A ViewBuilder closure that provides content for empty panes
-    public init(
-        controller: BonsplitController,
-        onDividerDragEnd: (() -> Void)? = nil,
-        @ViewBuilder content: @escaping (Tab, PaneID) -> Content,
-        @ViewBuilder emptyPane: @escaping (PaneID) -> EmptyContent
-    ) {
-        self.controller = controller
-        self.onDividerDragEnd = onDividerDragEnd
-        self.contentBuilder = content
-        self.emptyPaneBuilder = emptyPane
-    }
-
-    public var body: some View {
-        SplitViewContainer(
-            contentBuilder: { tabItem, paneId in
-                contentBuilder(Tab(from: tabItem), PaneID(id: paneId.id))
-            },
-            emptyPaneBuilder: { internalPaneId in
-                emptyPaneBuilder(PaneID(id: internalPaneId.id))
-            },
-            showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons,
-            contentViewLifecycle: controller.configuration.contentViewLifecycle,
-            onGeometryChange: { [weak controller] isDragging in
-                controller?.notifyGeometryChange(isDragging: isDragging)
-            },
-            onDividerDragEnd: onDividerDragEnd
-        )
-        .environment(controller)
-        .environment(controller.internalController)
-    }
-}
-
-// MARK: - Convenience initializer with default empty view
-
-extension BonsplitView where EmptyContent == DefaultEmptyPaneView {
-    /// Initialize with a controller and content builder, using the default empty pane view
-    /// - Parameters:
-    ///   - controller: The BonsplitController managing the tab state
-    ///   - onDividerDragEnd: Called once after the user finishes dragging a
-    ///     split divider. See the main initializer for details.
     ///   - content: A ViewBuilder closure that provides content for each tab. Receives the tab and pane ID.
     public init(
         controller: BonsplitController,
@@ -81,24 +36,25 @@ extension BonsplitView where EmptyContent == DefaultEmptyPaneView {
         self.controller = controller
         self.onDividerDragEnd = onDividerDragEnd
         self.contentBuilder = content
-        self.emptyPaneBuilder = { _ in DefaultEmptyPaneView() }
     }
-}
-
-/// Default view shown when a pane has no tabs
-public struct DefaultEmptyPaneView: View {
-    public init() {}
 
     public var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-
-            Text("No Open Tabs")
-                .font(.headline)
-                .foregroundStyle(.secondary)
+        // When rootNode is nil (no panes), render nothing. The host is
+        // expected to handle this state (e.g., Boo closes the window).
+        if controller.internalController.rootNode != nil {
+            SplitViewContainer(
+                contentBuilder: { tabItem, paneId in
+                    contentBuilder(Tab(from: tabItem), PaneID(id: paneId.id))
+                },
+                showSplitButtons: controller.configuration.allowSplits && controller.configuration.appearance.showSplitButtons,
+                contentViewLifecycle: controller.configuration.contentViewLifecycle,
+                onGeometryChange: { [weak controller] isDragging in
+                    controller?.notifyGeometryChange(isDragging: isDragging)
+                },
+                onDividerDragEnd: onDividerDragEnd
+            )
+            .environment(controller)
+            .environment(controller.internalController)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

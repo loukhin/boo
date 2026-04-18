@@ -62,7 +62,6 @@ final class BooState: ObservableObject {
         let config = BonsplitConfiguration(
             allowSplits: true,
             allowCloseTabs: true,
-            allowCloseLastPane: false,
             contentViewLifecycle: .keepAllAlive
         )
         self.controller = BonsplitController(configuration: config)
@@ -71,31 +70,12 @@ final class BooState: ObservableObject {
         subscribeToGhosttyNotifications()
 
         // Seed one initial tab so the window isn't empty on open.
+        // Bonsplit starts with no panes; the first createTab bootstraps the tree.
         newTab()
-
-        // Bonsplit seeds every new window with a default "Welcome" tab
-        // (title "Welcome", icon "star"). There's no public config to
-        // disable it, so we find and close it after creating our own
-        // first tab. See bonsplitboo project for the original workaround.
-        // If Bonsplit ever adds an option to suppress the welcome tab,
-        // this can be removed.
-        removeBonsplitWelcomeTab()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-    }
-
-    private func removeBonsplitWelcomeTab() {
-        for paneId in controller.allPaneIds {
-            let tabs = controller.tabs(inPane: paneId)
-            if let welcome = tabs.first(where: {
-                $0.title == "Welcome" && $0.icon == "star"
-            }) {
-                _ = controller.closeTab(welcome.id)
-                return
-            }
-        }
     }
 
     // MARK: - Tab ops
@@ -454,8 +434,7 @@ extension BooState: BonsplitDelegate {
     ///
     /// Also closes the enclosing window when the last surface goes away,
     /// which is what users expect when they `exit` the shell in the only
-    /// tab of the only pane. Bonsplit leaves the pane visibly empty
-    /// otherwise because `allowCloseLastPane` is false.
+    /// tab of the only pane.
     func splitTabBar(
         _ controller: BonsplitController,
         didCloseTab tabId: TabID,
@@ -549,6 +528,11 @@ extension BooState: BonsplitDelegate {
         didFocusPane pane: PaneID
     ) {
         updateWindowChromeTabId()
+        // Also push AppKit focus into the pane's selected surface.
+        // This handles the case where the user clicks an already-selected
+        // tab in another pane: didSelectTab doesn't fire (tab was already
+        // selected), but we still need to move first-responder.
+        focusCurrentTabSurface()
     }
 
     /// Move AppKit first-responder focus to this tab's surface.

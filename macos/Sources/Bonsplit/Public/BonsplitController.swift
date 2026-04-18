@@ -46,7 +46,20 @@ public final class BonsplitController {
     ) -> TabID? {
         let tabId = TabID()
         let tab = Tab(id: tabId, title: title, icon: icon, isDirty: isDirty)
-        let targetPane = pane ?? focusedPaneId ?? PaneID(id: internalController.rootNode.allPaneIds.first!.id)
+        let targetPane: PaneID
+        if let pane {
+            targetPane = pane
+        } else if let focused = focusedPaneId {
+            targetPane = focused
+        } else if let first = internalController.rootNode?.allPaneIds.first {
+            targetPane = PaneID(id: first.id)
+        } else {
+            // No panes exist yet — internal addTab will bootstrap one
+            let tabItem = TabItem(id: tabId.id, title: title, icon: icon, isDirty: isDirty)
+            internalController.addTab(tabItem, toPane: nil, atIndex: nil)
+            delegate?.splitTabBar(self, didCreateTab: tab, inPane: focusedPaneId!)
+            return tabId
+        }
 
         // Check with delegate
         if delegate?.splitTabBar(self, shouldCreateTab: tab, inPane: targetPane) == false {
@@ -58,7 +71,7 @@ public final class BonsplitController {
         switch configuration.newTabPosition {
         case .current:
             // Insert after the currently selected tab
-            if let paneState = internalController.rootNode.findPane(PaneID(id: targetPane.id)),
+            if let paneState = internalController.rootNode?.findPane(PaneID(id: targetPane.id)),
                let selectedTabId = paneState.selectedTabId,
                let currentIndex = paneState.tabs.firstIndex(where: { $0.id == selectedTabId }) {
                 insertIndex = currentIndex + 1
@@ -118,7 +131,7 @@ public final class BonsplitController {
     /// - Parameter tabId: The tab to close
     /// - Parameter paneId: The pane in which to close the tab
     public func closeTab(_ tabId: TabID, inPane paneId: PaneID) -> Bool {
-        guard let pane = internalController.rootNode.findPane(paneId),
+        guard let pane = internalController.rootNode?.findPane(paneId),
               let tabIndex = pane.tabs.firstIndex(where: { $0.id == tabId.id }) else {
             return false
         }
@@ -145,7 +158,7 @@ public final class BonsplitController {
         // is closed and other panes still exist). The internal controller
         // does the collapse without calling `closePane(_:)` on ourselves,
         // so `didClosePane` would otherwise never fire in that path.
-        let panesBefore = Set(internalController.rootNode.allPaneIds.map { $0.id })
+        let panesBefore = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
 
         internalController.closeTab(tabId.id, inPane: pane.id)
 
@@ -154,7 +167,7 @@ public final class BonsplitController {
 
         // If the pane we closed the tab in is gone, surface the implicit
         // pane close as a proper delegate event.
-        let panesAfter = Set(internalController.rootNode.allPaneIds.map { $0.id })
+        let panesAfter = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
         for removed in panesBefore.subtracting(panesAfter) {
             delegate?.splitTabBar(self, didClosePane: PaneID(id: removed))
         }
@@ -248,11 +261,6 @@ public final class BonsplitController {
     /// - Returns: true if the pane was closed, false if vetoed by delegate
     @discardableResult
     public func closePane(_ paneId: PaneID) -> Bool {
-        // Don't close if it's the last pane and not allowed
-        if !configuration.allowCloseLastPane && internalController.rootNode.allPaneIds.count <= 1 {
-            return false
-        }
-
         // Check with delegate
         if delegate?.splitTabBar(self, shouldClosePane: paneId) == false {
             return false
@@ -275,8 +283,7 @@ public final class BonsplitController {
 
     /// Currently focused pane ID
     public var focusedPaneId: PaneID? {
-        guard let internalId = internalController.focusedPaneId else { return nil }
-        return internalId
+        internalController.focusedPaneId
     }
 
     /// Focus a specific pane
@@ -297,7 +304,7 @@ public final class BonsplitController {
     /// selected-tab change through the delegate so hosts can sync embedded
     /// content focus (e.g. Boo pushing first responder into the moved terminal).
     public func moveTab(_ tab: Tab, from sourcePaneId: PaneID, to targetPaneId: PaneID, atIndex index: Int? = nil) {
-        let panesBefore = Set(internalController.rootNode.allPaneIds.map { $0.id })
+        let panesBefore = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
 
         let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
         internalController.moveTab(internalTab, from: sourcePaneId, to: targetPaneId, atIndex: index)
@@ -305,7 +312,7 @@ public final class BonsplitController {
         delegate?.splitTabBar(self, didFocusPane: targetPaneId)
         delegate?.splitTabBar(self, didSelectTab: tab, inPane: targetPaneId)
 
-        let panesAfter = Set(internalController.rootNode.allPaneIds.map { $0.id })
+        let panesAfter = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
         for removed in panesBefore.subtracting(panesAfter) {
             delegate?.splitTabBar(self, didClosePane: PaneID(id: removed))
         }
@@ -315,14 +322,14 @@ public final class BonsplitController {
 
     /// Get all tab IDs
     public var allTabIds: [TabID] {
-        internalController.rootNode.allPanes.flatMap { pane in
+        internalController.rootNode?.allPanes.flatMap { pane in
             pane.tabs.map { TabID(id: $0.id) }
-        }
+        } ?? []
     }
 
     /// Get all pane IDs
     public var allPaneIds: [PaneID] {
-        internalController.rootNode.allPaneIds
+        internalController.rootNode?.allPaneIds ?? []
     }
 
     /// Get tab metadata by ID
@@ -333,7 +340,7 @@ public final class BonsplitController {
 
     /// Get tabs in a specific pane
     public func tabs(inPane paneId: PaneID) -> [Tab] {
-        guard let pane = internalController.rootNode.findPane(PaneID(id: paneId.id)) else {
+        guard let pane = internalController.rootNode?.findPane(PaneID(id: paneId.id)) else {
             return []
         }
         return pane.tabs.map { Tab(from: $0) }
@@ -341,7 +348,7 @@ public final class BonsplitController {
 
     /// Get selected tab in a pane
     public func selectedTab(inPane paneId: PaneID) -> Tab? {
-        guard let pane = internalController.rootNode.findPane(PaneID(id: paneId.id)),
+        guard let pane = internalController.rootNode?.findPane(PaneID(id: paneId.id)),
               let selected = pane.selectedTab else {
             return nil
         }
@@ -353,10 +360,10 @@ public final class BonsplitController {
     /// Get current layout snapshot with pixel coordinates
     public func layoutSnapshot() -> LayoutSnapshot {
         let containerFrame = internalController.containerFrame
-        let paneBounds = internalController.rootNode.computePaneBounds()
+        let paneBounds = internalController.rootNode?.computePaneBounds() ?? []
 
         let paneGeometries = paneBounds.map { bounds -> PaneGeometry in
-            let pane = internalController.rootNode.findPane(bounds.paneId)
+            let pane = internalController.rootNode?.findPane(bounds.paneId)
             let pixelFrame = PixelRect(
                 x: Double(bounds.bounds.minX * containerFrame.width + containerFrame.origin.x),
                 y: Double(bounds.bounds.minY * containerFrame.height + containerFrame.origin.y),
@@ -382,7 +389,16 @@ public final class BonsplitController {
     /// Get full tree structure for external consumption
     public func treeSnapshot() -> ExternalTreeNode {
         let containerFrame = internalController.containerFrame
-        return buildExternalTree(from: internalController.rootNode, containerFrame: containerFrame)
+        guard let rootNode = internalController.rootNode else {
+            // Return an empty pane node as placeholder
+            return .pane(ExternalPaneNode(
+                id: UUID().uuidString,
+                frame: PixelRect(from: containerFrame),
+                tabs: [],
+                selectedTabId: nil
+            ))
+        }
+        return buildExternalTree(from: rootNode, containerFrame: containerFrame)
     }
 
     private func buildExternalTree(from node: SplitNode, containerFrame: CGRect, bounds: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)) -> ExternalTreeNode {
@@ -497,7 +513,8 @@ public final class BonsplitController {
     // MARK: - Private Helpers
 
     private func findTabInternal(_ tabId: TabID) -> (PaneState, Int)? {
-        for pane in internalController.rootNode.allPanes {
+        guard let rootNode = internalController.rootNode else { return nil }
+        for pane in rootNode.allPanes {
             if let index = pane.tabs.firstIndex(where: { $0.id == tabId.id }) {
                 return (pane, index)
             }

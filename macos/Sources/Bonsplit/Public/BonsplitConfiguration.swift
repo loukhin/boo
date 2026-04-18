@@ -35,17 +35,11 @@ public struct BonsplitConfiguration: Sendable {
     /// Whether to allow closing tabs
     public var allowCloseTabs: Bool
 
-    /// Whether to allow closing the last pane
-    public var allowCloseLastPane: Bool
-
     /// Whether to allow drag & drop reordering of tabs
     public var allowTabReordering: Bool
 
     /// Whether to allow moving tabs between panes
     public var allowCrossPaneTabMove: Bool
-
-    /// Whether to automatically close empty panes
-    public var autoCloseEmptyPanes: Bool
 
     /// Controls how tab content views are managed when switching tabs
     public var contentViewLifecycle: ContentViewLifecycle
@@ -63,8 +57,7 @@ public struct BonsplitConfiguration: Sendable {
     public static let `default` = BonsplitConfiguration()
 
     public static let singlePane = BonsplitConfiguration(
-        allowSplits: false,
-        allowCloseLastPane: false
+        allowSplits: false
     )
 
     public static let readOnly = BonsplitConfiguration(
@@ -79,20 +72,16 @@ public struct BonsplitConfiguration: Sendable {
     public init(
         allowSplits: Bool = true,
         allowCloseTabs: Bool = true,
-        allowCloseLastPane: Bool = false,
         allowTabReordering: Bool = true,
         allowCrossPaneTabMove: Bool = true,
-        autoCloseEmptyPanes: Bool = true,
         contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch,
         newTabPosition: NewTabPosition = .current,
         appearance: Appearance = .default
     ) {
         self.allowSplits = allowSplits
         self.allowCloseTabs = allowCloseTabs
-        self.allowCloseLastPane = allowCloseLastPane
         self.allowTabReordering = allowTabReordering
         self.allowCrossPaneTabMove = allowCrossPaneTabMove
-        self.autoCloseEmptyPanes = autoCloseEmptyPanes
         self.contentViewLifecycle = contentViewLifecycle
         self.newTabPosition = newTabPosition
         self.appearance = appearance

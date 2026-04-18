@@ -26,13 +26,12 @@ enum DropZone: Equatable {
 }
 
 /// Container for a single pane with its tab bar and content area
-struct PaneContainerView<Content: View, EmptyContent: View>: View {
+struct PaneContainerView<Content: View>: View {
     @Environment(BonsplitController.self) private var bonsplitController
     @Environment(SplitViewController.self) private var controller
 
     @Bindable var pane: PaneState
     let contentBuilder: (TabItem, PaneID) -> Content
-    let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
 
@@ -80,26 +79,26 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if pane.tabs.isEmpty {
-            emptyPaneView
-        } else {
-            switch contentViewLifecycle {
-            case .recreateOnSwitch:
-                // Original behavior: only render selected tab
-                if let selectedTab = pane.selectedTab {
-                    contentBuilder(selectedTab, pane.id)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+        // Empty panes are destroyed, so we always have at least one tab here.
+        switch contentViewLifecycle {
+        case .recreateOnSwitch:
+            // Original behavior: only render selected tab
+            if let selectedTab = pane.selectedTab {
+                contentBuilder(selectedTab, pane.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
-            case .keepAllAlive:
-                // macOS-like behavior: keep all tab views in hierarchy
-                ZStack {
-                    ForEach(pane.tabs) { tab in
-                        contentBuilder(tab, pane.id)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .opacity(tab.id == pane.selectedTabId ? 1 : 0)
-                            .allowsHitTesting(tab.id == pane.selectedTabId)
-                    }
+        case .keepAllAlive:
+            // macOS-like behavior: keep all tab views in hierarchy
+            ZStack {
+                ForEach(pane.tabs) { tab in
+                    let isSelected = tab.id == pane.selectedTabId
+                    contentBuilder(tab, pane.id)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // Instant show/hide — no fade animation on tab switch.
+                        .opacity(isSelected ? 1 : 0)
+                        .transaction { $0.animation = nil }
+                        .allowsHitTesting(isSelected)
                 }
             }
         }
@@ -163,13 +162,6 @@ struct PaneContainerView<Content: View, EmptyContent: View>: View {
             .animation(.spring(duration: 0.25, bounce: 0.15), value: zone)
     }
 
-    // MARK: - Empty Pane View
-
-    @ViewBuilder
-    private var emptyPaneView: some View {
-        emptyPaneBuilder(pane.id)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }
 
 // MARK: - Unified Pane Drop Delegate
@@ -236,7 +228,7 @@ struct UnifiedPaneDropDelegate: DropDelegate {
                 }
 
                 // Find source pane
-                guard let sourcePaneId = controller.rootNode.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
+                guard let sourcePaneId = controller.rootNode?.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
                     return
                 }
 
@@ -255,11 +247,11 @@ struct UnifiedPaneDropDelegate: DropDelegate {
                     // render the new split in place; entry animation is
                     // currently a no-op (see runEntryAnimationIfNeeded).
                     // Remove tab from source first
-                    if let sourcePane = controller.rootNode.findPane(sourcePaneId) {
+                    if let sourcePane = controller.rootNode?.findPane(sourcePaneId) {
                         sourcePane.removeTab(transfer.tab.id)
 
-                        // Close empty source pane if not the only one
-                        if sourcePane.tabs.isEmpty && controller.rootNode.allPaneIds.count > 1 {
+                        // Destroy empty source pane
+                        if sourcePane.tabs.isEmpty {
                             controller.closePane(sourcePaneId)
                         }
                     }

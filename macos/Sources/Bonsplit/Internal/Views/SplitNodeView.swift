@@ -6,12 +6,11 @@ import SwiftUI
 /// panes in an `NSHostingController`/`NSViewRepresentable` to satisfy AppKit
 /// layout constraints — SwiftUI handles sizing natively. This used to hold a
 /// `SinglePaneWrapper` for that reason; it's been removed.
-struct SplitNodeView<Content: View, EmptyContent: View>: View {
+struct SplitNodeView<Content: View>: View {
     @Environment(SplitViewController.self) private var controller
 
     let node: SplitNode
     let contentBuilder: (TabItem, PaneID) -> Content
-    let emptyPaneBuilder: (PaneID) -> EmptyContent
     var showSplitButtons: Bool = true
     var contentViewLifecycle: ContentViewLifecycle = .recreateOnSwitch
     var onGeometryChange: ((_ isDragging: Bool) -> Void)?
@@ -23,7 +22,6 @@ struct SplitNodeView<Content: View, EmptyContent: View>: View {
             PaneContainerView(
                 pane: paneState,
                 contentBuilder: contentBuilder,
-                emptyPaneBuilder: emptyPaneBuilder,
                 showSplitButtons: showSplitButtons,
                 contentViewLifecycle: contentViewLifecycle
             )
@@ -33,7 +31,6 @@ struct SplitNodeView<Content: View, EmptyContent: View>: View {
                 splitState: splitState,
                 controller: controller,
                 contentBuilder: contentBuilder,
-                emptyPaneBuilder: emptyPaneBuilder,
                 showSplitButtons: showSplitButtons,
                 contentViewLifecycle: contentViewLifecycle,
                 onGeometryChange: onGeometryChange,
