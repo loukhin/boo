@@ -53,6 +53,12 @@ final class BooState: ObservableObject {
     /// surface fully resign first responder in those paths unless we name the
     /// source surface explicitly.
     private weak var focusedOwnedSurface: Ghostty.SurfaceView?
+    
+    /// Guard to prevent re-entrant focus changes. When true, focus-related
+    /// callbacks are suppressed to avoid oscillation loops.
+    /// Guard to prevent re-entrant focus changes. When true, focus-related
+    /// callbacks are suppressed to avoid oscillation loops.
+    @Published private(set) var isChangingFocus = false
 
     private var tabCounter = 0
 
@@ -82,10 +88,12 @@ final class BooState: ObservableObject {
 
     /// Create a new Bonsplit tab and spawn a fresh ghostty surface into it.
     /// If `paneId` is nil, the tab goes to Bonsplit's focused pane.
+    /// If `focusAfterCreate` is false, focus is not moved to the new surface.
     @discardableResult
     func newTab(
         inPane paneId: PaneID? = nil,
-        baseConfig: Ghostty.SurfaceConfiguration? = nil
+        baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        focusAfterCreate: Bool = true
     ) -> TabID? {
         guard let app = ghostty.app else { return nil }
 
@@ -104,7 +112,9 @@ final class BooState: ObservableObject {
         // createTab — at which point our map is still empty.
         surfaces[tabId] = surface
         observeSurface(surface, forTab: tabId)
-        focusSurface(for: tabId)
+        if focusAfterCreate {
+            focusSurface(for: tabId)
+        }
         updateWindowChromeTabId()
         return tabId
     }
@@ -387,6 +397,9 @@ final class BooState: ObservableObject {
     /// surface that *actually* gained focus, not whichever SwiftUI wrapper
     /// happened to receive a gesture in an overlapping/unstable hit-test pass.
     @objc private func onGhosttySurfaceFocusDidChange(_ note: Notification) {
+        // Skip if we're already in the middle of changing focus to avoid loops.
+        guard !isChangingFocus else { return }
+        
         guard let surface = note.object as? Ghostty.SurfaceView,
               surfaces.values.contains(where: { $0 === surface }),
               let focused = note.userInfo?["focused"] as? Bool,
@@ -398,7 +411,11 @@ final class BooState: ObservableObject {
 
         let current = controller.focusedPaneId
         if current != paneId {
+            // Set the guard before calling focusPane to prevent didFocusPane
+            // from triggering another focus change.
+            isChangingFocus = true
             controller.focusPane(paneId)
+            isChangingFocus = false
         }
     }
 
@@ -450,6 +467,10 @@ extension BooState: BonsplitDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.window?.performClose(nil)
             }
+        } else if controller.focusedPaneId == pane {
+            // Focus the newly selected tab in this pane (if any).
+            // This handles the case where the closed tab was focused.
+            focusCurrentTabSurface(inPane: pane)
         }
         // Note: structural recovery (epoch bump, focus) is handled by
         // didClosePane below. A plain tab close that leaves the pane
@@ -466,15 +487,21 @@ extension BooState: BonsplitDelegate {
         _ controller: BonsplitController,
         didClosePane paneId: PaneID
     ) {
+        // Only refocus if we're not already in the middle of a focus change.
+        // During tab moves, focus is set before the empty pane closes.
+        let shouldRefocus = !isChangingFocus
         DispatchQueue.main.async { [weak self] in
-            self?.focusCurrentTabSurface()
-            self?.updateWindowChromeTabId()
+            guard let self else { return }
+            if shouldRefocus {
+                self.focusCurrentTabSurface()
+            }
+            self.updateWindowChromeTabId()
         }
     }
 
     /// After Bonsplit creates the new pane from a split, populate it with
-    /// a fresh ghostty surface using whatever config was stashed by the
-    /// initiating `splitPane(from:direction:)` call.
+    /// a fresh ghostty surface — unless the pane already has a tab with a
+    /// surface (drag-drop moved an existing tab into the new pane).
     func splitTabBar(
         _ controller: BonsplitController,
         didSplitPane originalPane: PaneID,
@@ -486,16 +513,31 @@ extension BooState: BonsplitDelegate {
         pendingSplitConfig = nil
         pendingSplitSource = nil
 
-        guard let tabId = newTab(inPane: newPane, baseConfig: cfg),
-              let newSurface = surfaces[tabId] else { return }
+        // Check if the new pane already has a tab with a surface (drag-drop
+        // moved an existing tab). If so, just focus it instead of creating
+        // a new surface.
+        let existingTabs = controller.tabs(inPane: newPane)
+        if let existingTab = existingTabs.first, let existingSurface = surfaces[existingTab.id] {
+            if let source, source !== existingSurface {
+                Ghostty.moveFocus(to: existingSurface, from: source)
+            } else {
+                Ghostty.moveFocus(to: existingSurface)
+            }
+            focusedOwnedSurface = existingSurface
+            return
+        }
 
-        // Explicitly pass the source surface as `from` so its
-        // `resignFirstResponder` fires reliably — AppKit sometimes
-        // skips it in our setup, leaving the old pane visually focused.
-        // For UI-originated splits (tab-bar split buttons) we don't have a
-        // pending source from a ghostty action, so fall back to the most
-        // recently focused owned surface.
-        if let source, source !== newSurface {
+        // Keybind/menu split: create a fresh surface in the new pane.
+        // For drag-drop splits (cfg is nil), don't focus the new surface
+        // because the user expects focus to follow the dragged tab.
+        let isDragDropSplit = (cfg == nil)
+        guard let tabId = newTab(inPane: newPane, baseConfig: cfg, focusAfterCreate: !isDragDropSplit),
+              let newSurface = surfaces[tabId] else {
+            return
+        }
+
+        // For keybind/menu splits, also move AppKit first responder.
+        if !isDragDropSplit, let source, source !== newSurface {
             Ghostty.moveFocus(to: newSurface, from: source)
             focusedOwnedSurface = newSurface
         }
@@ -528,6 +570,8 @@ extension BooState: BonsplitDelegate {
         didFocusPane pane: PaneID
     ) {
         updateWindowChromeTabId()
+        // Skip if we're in the middle of a focus change to avoid loops.
+        guard !isChangingFocus else { return }
         // Also push AppKit focus into the pane's selected surface.
         // This handles the case where the user clicks an already-selected
         // tab in another pane: didSelectTab doesn't fire (tab was already
@@ -538,6 +582,20 @@ extension BooState: BonsplitDelegate {
     /// Move AppKit first-responder focus to this tab's surface.
     private func focusSurface(for tabId: TabID) {
         guard let surface = surfaces[tabId] else { return }
+        
+        // Skip if this surface is already the actual first responder.
+        // We check both our tracking variable AND the actual AppKit state
+        // because drag operations can steal first-responder without updating
+        // our tracking.
+        let isActualFirstResponder = surface.window?.firstResponder === surface
+        if focusedOwnedSurface === surface && isActualFirstResponder {
+            return
+        }
+        
+        // Prevent re-entrant focus changes that could cause oscillation.
+        guard !isChangingFocus else { return }
+        isChangingFocus = true
+        defer { isChangingFocus = false }
 
         if let previous = focusedOwnedSurface, previous !== surface {
             Ghostty.moveFocus(to: surface, from: previous)
@@ -552,8 +610,12 @@ extension BooState: BonsplitDelegate {
     /// `BooController.windowDidBecomeKey` so reactivating the window also
     /// restores terminal focus without requiring a click.
     func focusCurrentTabSurface() {
-        guard let paneId = controller.focusedPaneId,
-              let tab = controller.selectedTab(inPane: paneId) else { return }
+        guard let paneId = controller.focusedPaneId else { return }
+        focusCurrentTabSurface(inPane: paneId)
+    }
+    
+    func focusCurrentTabSurface(inPane paneId: PaneID) {
+        guard let tab = controller.selectedTab(inPane: paneId) else { return }
         focusSurface(for: tab.id)
     }
 }

@@ -175,7 +175,12 @@ extension Ghostty {
         var notificationIdentifiers: Set<String> = []
 
         private var markedText: NSMutableAttributedString
-        private(set) var focused: Bool = true
+        private(set) var focused: Bool = false
+        
+        /// Cached scroll view wrapper for this surface. SwiftUI may call
+        /// makeOSView multiple times during view hierarchy restructuring.
+        /// We cache the wrapper to ensure consistent behavior.
+        var cachedScrollView: SurfaceScrollView?
         private var prevPressureStage: Int = 0
         private var appearanceObserver: NSKeyValueObservation?
 
@@ -350,6 +355,10 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
+            
+            // New surfaces start unfocused. Tell libghostty so the cursor
+            // renders correctly (hollow instead of filled).
+            ghostty_surface_set_focus(surface, false)
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()

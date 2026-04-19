@@ -36,12 +36,14 @@ struct BooRootView: View {
                     surface: surface,
                     isSelected: isSelected
                 )
-                // Identity keyed on the surface itself so SwiftUI preserves
-                // the representable across tab/pane reparenting. Bonsplit's
-                // split-tree is now pure SwiftUI, so reshaping doesn't tear
-                // down the NSView subtree and we no longer need to force a
-                // remount on pane close.
-                .id(ObjectIdentifier(surface).hashValue)
+                // NOTE: we intentionally do NOT use `.id(surface)` here.
+                // With `keepAllAlive` mode, tabs live in ForEach inside
+                // different pane ZStacks. When a tab moves between panes,
+                // SwiftUI's view identity reconciliation with `.id()` gets
+                // confused and can leave views unmounted. Without `.id()`,
+                // SwiftUI recreates the wrapper on reparent, but the
+                // underlying SurfaceView NSView reattaches correctly since
+                // it's passed by reference.
             } else {
                 BooTabPlaceholder(title: tab.title)
             }
@@ -66,19 +68,18 @@ private struct BooSurfaceContainer: View {
     let isSelected: Bool
 
     var body: some View {
+        // NOTE: We intentionally do NOT auto-focus when isSelected changes.
+        // During tab drag operations, the source pane auto-selects a
+        // remaining tab which would steal focus from the target pane.
+        // Focus is managed explicitly via focusSurface() calls.
+        //
+        // Important: no SwiftUI TapGesture here. In nested split layouts
+        // the wrapper gesture proved unreliable: the terminal under the
+        // mouse could gain AppKit focus while a sibling wrapper received
+        // the SwiftUI tap event. Boo now syncs Bonsplit pane focus from
+        // `SurfaceView.focusDidChange(_:)`, i.e. from the actual NSView
+        // that became first responder.
         Ghostty.SurfaceWrapper(surfaceView: surface, isSplit: true)
-            .onChange(of: isSelected) { _, nowSelected in
-                if nowSelected {
-                    Ghostty.moveFocus(to: surface)
-                }
-            }
-            // Important: no SwiftUI TapGesture here.
-            //
-            // In nested split layouts the wrapper gesture proved unreliable:
-            // the terminal under the mouse could gain AppKit focus while a
-            // sibling wrapper received the SwiftUI tap event. Boo now syncs
-            // Bonsplit pane focus from `SurfaceView.focusDidChange(_:)`, i.e.
-            // from the actual NSView that became first responder.
     }
 }
 

@@ -5,7 +5,7 @@ enum TabBarMetrics {
     // MARK: - Tab Bar
 
     static let barHeight: CGFloat = 27
-    static let barPadding: CGFloat = 0
+    static let barTrailingPadding: CGFloat = 48
 
     // MARK: - Individual Tabs
 
@@ -36,6 +36,7 @@ enum TabBarMetrics {
 
     static let dropIndicatorWidth: CGFloat = 2
     static let dropIndicatorHeight: CGFloat = 20
+    static let dropZoneWidth: CGFloat = 24
 
     // MARK: - Split View
 
@@ -45,7 +46,7 @@ enum TabBarMetrics {
 
     // MARK: - Animations
 
-    static let selectionDuration: Double = 0.15
+    static let selectionDuration: Double = 0
     static let closeDuration: Double = 0.2
     static let reorderDuration: Double = 0.3
     static let reorderBounce: Double = 0.15

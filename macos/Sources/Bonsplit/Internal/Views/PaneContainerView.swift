@@ -117,7 +117,7 @@ struct PaneContainerView<Content: View>: View {
         // the same click. Keep this layer drop-only so surface clicks are owned
         // by the surface host instead of by an invisible full-pane overlay.
         Color.clear
-            .onDrop(of: [.text], delegate: UnifiedPaneDropDelegate(
+            .onDrop(of: [.bonsplitTab], delegate: UnifiedPaneDropDelegate(
                 size: size,
                 pane: pane,
                 bonsplitController: bonsplitController,
@@ -195,87 +195,44 @@ struct UnifiedPaneDropDelegate: DropDelegate {
 
     func performDrop(info: DropInfo) -> Bool {
         let zone = zoneForLocation(info.location)
+        activeDropZone = nil
 
-        guard let provider = info.itemProviders(for: [.text]).first else {
-            activeDropZone = nil
-            // Clear drag state
-            controller.draggingTab = nil
-            controller.dragSourcePaneId = nil
+        // Use stored drag state directly (faster than async NSItemProvider)
+        guard let tab = controller.draggingTab,
+              let sourcePaneId = controller.dragSourcePaneId else {
             return false
         }
+        
+        // Clear drag state
+        let draggedTab = tab
+        let sourceId = sourcePaneId
+        controller.draggingTab = nil
+        controller.dragSourcePaneId = nil
 
-        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
-            DispatchQueue.main.async {
-                activeDropZone = nil
-                // Clear drag state
-                controller.draggingTab = nil
-                controller.dragSourcePaneId = nil
-
-                // Handle both Data and String representations
-                let string: String?
-                if let data = item as? Data {
-                    string = String(data: data, encoding: .utf8)
-                } else if let nsString = item as? NSString {
-                    string = nsString as String
-                } else if let str = item as? String {
-                    string = str
-                } else {
-                    string = nil
-                }
-
-                guard let string, let transfer = decodeTransfer(from: string) else {
-                    return
-                }
-
-                // Find source pane
-                guard let sourcePaneId = controller.rootNode?.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
-                    return
-                }
-
-                if zone == .center {
-                    // Drop in center - move tab to this pane
-                    withAnimation(.spring(duration: 0.3, bounce: 0.15)) {
-                        bonsplitController.moveTab(
-                            Tab(from: transfer.tab),
-                            from: sourcePaneId,
-                            to: pane.id,
-                            atIndex: nil
-                        )
-                    }
-                } else if let orientation = zone.orientation {
-                    // Drop on edge - create a split. SplitContainerView will
-                    // render the new split in place; entry animation is
-                    // currently a no-op (see runEntryAnimationIfNeeded).
-                    // Remove tab from source first
-                    if let sourcePane = controller.rootNode?.findPane(sourcePaneId) {
-                        sourcePane.removeTab(transfer.tab.id)
-
-                        // Destroy empty source pane
-                        if sourcePane.tabs.isEmpty {
-                            controller.closePane(sourcePaneId)
-                        }
-                    }
-
-                    // Create the split
-                    controller.splitPaneWithTab(
-                        pane.id,
-                        orientation: orientation,
-                        tab: transfer.tab,
-                        insertFirst: zone.insertsFirst
-                    )
-
-                    // Mirror the internal focus/selection change through the
-                    // public delegate path so hosts can sync embedded content.
-                    if let newPaneId = controller.focusedPaneId {
-                        bonsplitController.delegate?.splitTabBar(bonsplitController, didFocusPane: newPaneId)
-                        bonsplitController.delegate?.splitTabBar(
-                            bonsplitController,
-                            didSelectTab: Tab(from: transfer.tab),
-                            inPane: newPaneId
-                        )
-                    }
-                }
+        if zone == .center {
+            // Drop in center - move tab to this pane
+            withAnimation(.spring(duration: 0.3, bounce: 0.15)) {
+                bonsplitController.moveTab(
+                    Tab(from: draggedTab),
+                    from: sourceId,
+                    to: pane.id,
+                    atIndex: nil
+                )
             }
+        } else if let orientation = zone.orientation {
+            // Drop on edge - create a split with the moved tab.
+            // Routes through public API so proper delegate callbacks
+            // fire (didSplitPane, didClosePane if source empties, etc).
+            let tabToMove = Tab(from: draggedTab)
+            let targetPaneId = pane.id
+            let insertFirst = zone.insertsFirst
+            _ = bonsplitController.splitPaneWithMovedTab(
+                tabToMove,
+                from: sourceId,
+                targetPaneId: targetPaneId,
+                orientation: orientation,
+                insertFirst: insertFirst
+            )
         }
 
         return true
@@ -290,19 +247,16 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        activeDropZone = zoneForLocation(info.location)
+        // Only update drop zone if there's an active drag. After performDrop
+        // clears draggingTab, we ignore further updates to prevent the overlay
+        // from appearing on newly created panes during view restructuring.
+        if controller.draggingTab != nil {
+            activeDropZone = zoneForLocation(info.location)
+        }
         return DropProposal(operation: .move)
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [.text])
-    }
-
-    private func decodeTransfer(from string: String) -> TabTransferData? {
-        guard let data = string.data(using: .utf8),
-              let transfer = try? JSONDecoder().decode(TabTransferData.self, from: data) else {
-            return nil
-        }
-        return transfer
+        info.hasItemsConforming(to: [.bonsplitTab])
     }
 }

@@ -583,8 +583,17 @@ extension Ghostty {
 
         #if canImport(AppKit)
         func makeOSView(context: Context) -> SurfaceScrollView {
-            // On macOS, wrap the surface view in a scroll view
-            return SurfaceScrollView(contentSize: size, surfaceView: view)
+            // Reuse cached scroll view if available. SwiftUI may call
+            // makeOSView multiple times during view hierarchy restructuring.
+            // We must return the same scroll view each time to avoid creating
+            // multiple wrappers that fight over the same SurfaceView (which
+            // can only have one superview).
+            if let cached = view.cachedScrollView {
+                return cached
+            }
+            let scrollView = SurfaceScrollView(contentSize: size, surfaceView: view)
+            view.cachedScrollView = scrollView
+            return scrollView
         }
 
         func updateOSView(_ scrollView: SurfaceScrollView, context: Context) {
@@ -1152,8 +1161,13 @@ extension Ghostty {
             // focus, make sure that we explicitly tell it to lose focus. In theory
             // we should NOT have to do this but the focus callback isn't getting
             // called for some reason.
+            //
+            // NOTE: During drag operations, the first responder might be the drag
+            // proxy, so resignFirstResponder() returns false. We explicitly call
+            // focusDidChange(false) to ensure the cursor visual updates.
             if let from = from {
                 _ = from.resignFirstResponder()
+                from.focusDidChange(false)
             }
 
             window.makeFirstResponder(to)

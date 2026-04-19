@@ -164,6 +164,22 @@ class SurfaceScrollView: NSView {
     // surface view if we have the "hidden" titlebar style.
     override var safeAreaInsets: NSEdgeInsets { return NSEdgeInsetsZero }
 
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+
+        // When this scroll view is re-added to the view hierarchy (e.g.,
+        // after SwiftUI restructuring), force a complete relayout and
+        // redraw to ensure the Metal surface renders correctly.
+        if superview != nil {
+            needsLayout = true
+            needsDisplay = true
+            scrollView.needsLayout = true
+            scrollView.needsDisplay = true
+            surfaceView.needsLayout = true
+            surfaceView.needsDisplay = true
+        }
+    }
+
     override func layout() {
         super.layout()
 

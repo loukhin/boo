@@ -2,6 +2,15 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+/// Custom UTType for tab drag/drop within Bonsplit.
+/// Other apps won't recognize this type, preventing accidental external drops.
+extension UTType {
+    static let bonsplitTab: UTType = {
+        // Create a dynamic type conforming to public.data
+        UTType(tag: "boo-tab", tagClass: .filenameExtension, conformingTo: .data)!
+    }()
+}
+
 /// Tab bar view with scrollable tabs, drag/drop support, and split buttons
 struct TabBarView: View {
     @Environment(BonsplitController.self) private var controller
@@ -65,9 +74,10 @@ struct TabBarView: View {
                                 .id(tab.id)
                         }
 
-                        Spacer(minLength: splitButtonLaneWidth)
+                        // Drop zone after last tab - provides indicator anchor at content end
+                        dropZoneAtEnd
                     }
-                    .padding(.horizontal, TabBarMetrics.barPadding)
+                    .padding(.trailing, TabBarMetrics.barTrailingPadding)
                     .background(
                         GeometryReader { contentGeo in
                             Color.clear
@@ -90,7 +100,7 @@ struct TabBarView: View {
                         if trailing >= 1 {
                             WindowDragZoneView()
                                 .frame(width: trailing, height: TabBarMetrics.tabHeight)
-                                .onDrop(of: [.text], delegate: TabDropDelegate(
+                                .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
                                     targetIndex: pane.tabs.count,
                                     pane: pane,
                                     bonsplitController: controller,
@@ -101,11 +111,6 @@ struct TabBarView: View {
 
                         if showSplitButtons {
                             trailingButtonLaneDropZone
-                        }
-                    }
-                    .overlay(alignment: .leading) {
-                        if dropTargetIndex == pane.tabs.count {
-                            dropIndicator
                         }
                     }
                 }
@@ -165,7 +170,7 @@ struct TabBarView: View {
         } preview: {
             TabDragPreview(tab: tab)
         }
-        .onDrop(of: [.text], delegate: TabDropDelegate(
+        .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
             targetIndex: index,
             pane: pane,
             bonsplitController: controller,
@@ -187,11 +192,37 @@ struct TabBarView: View {
         splitViewController.dragSourcePaneId = pane.id
 
         let transfer = TabTransferData(tab: tab, sourcePaneId: pane.id.id)
-        if let data = try? JSONEncoder().encode(transfer),
-           let string = String(data: data, encoding: .utf8) {
-            return NSItemProvider(object: string as NSString)
+        guard let data = try? JSONEncoder().encode(transfer) else {
+            return NSItemProvider()
         }
-        return NSItemProvider()
+        
+        // Use custom UTType so other apps won't accept the drop
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.bonsplitTab.identifier, visibility: .ownProcess) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
+    }
+
+    // MARK: - Drop Zone After Last Tab
+
+    @ViewBuilder
+    private var dropZoneAtEnd: some View {
+        WindowDragZoneView()
+            .frame(width: TabBarMetrics.dropZoneWidth, height: TabBarMetrics.tabHeight)
+            .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
+                targetIndex: pane.tabs.count,
+                pane: pane,
+                bonsplitController: controller,
+                controller: splitViewController,
+                dropTargetIndex: $dropTargetIndex
+            ))
+            .overlay(alignment: .leading) {
+                if dropTargetIndex == pane.tabs.count {
+                    dropIndicator
+                }
+            }
     }
 
     // MARK: - Fixed Trailing Drop / Drag Band
@@ -204,7 +235,7 @@ struct TabBarView: View {
         // mask actually live.
         WindowDragZoneView()
             .frame(width: splitButtonLaneWidth, height: TabBarMetrics.tabHeight)
-            .onDrop(of: [.text], delegate: TabDropDelegate(
+            .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
                 targetIndex: pane.tabs.count,
                 pane: pane,
                 bonsplitController: controller,
@@ -359,57 +390,35 @@ struct TabDropDelegate: DropDelegate {
     func performDrop(info: DropInfo) -> Bool {
         dropTargetIndex = nil
 
-        guard let provider = info.itemProviders(for: [.text]).first else {
-            // Clear drag state
-            controller.draggingTab = nil
-            controller.dragSourcePaneId = nil
+        // Use stored drag state directly (faster than async NSItemProvider)
+        guard let tab = controller.draggingTab,
+              let sourcePaneId = controller.dragSourcePaneId else {
             return false
         }
+        
+        // Clear drag state
+        let draggedTab = tab
+        let sourceId = sourcePaneId
+        controller.draggingTab = nil
+        controller.dragSourcePaneId = nil
 
-        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { item, _ in
-            DispatchQueue.main.async {
-                // Clear drag state
-                controller.draggingTab = nil
-                controller.dragSourcePaneId = nil
-
-                // Handle both Data and String representations
-                let string: String?
-                if let data = item as? Data {
-                    string = String(data: data, encoding: .utf8)
-                } else if let nsString = item as? NSString {
-                    string = nsString as String
-                } else if let str = item as? String {
-                    string = str
-                } else {
-                    string = nil
-                }
-
-                guard let string, let transfer = decodeTransfer(from: string) else {
-                    return
-                }
-
-                // Same pane - reorder
-                if transfer.sourcePaneId == pane.id.id {
-                    guard let sourceIndex = pane.tabs.firstIndex(where: { $0.id == transfer.tab.id }) else {
-                        return
-                    }
-                    withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
-                        pane.moveTab(from: sourceIndex, to: targetIndex)
-                    }
-                } else {
-                    // Different pane - transfer
-                    guard let sourcePaneId = controller.rootNode?.allPaneIds.first(where: { $0.id == transfer.sourcePaneId }) else {
-                        return
-                    }
-                    withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
-                        bonsplitController.moveTab(
-                            Tab(from: transfer.tab),
-                            from: sourcePaneId,
-                            to: pane.id,
-                            atIndex: targetIndex
-                        )
-                    }
-                }
+        // Same pane - reorder
+        if sourceId == pane.id {
+            guard let sourceIndex = pane.tabs.firstIndex(where: { $0.id == draggedTab.id }) else {
+                return false
+            }
+            withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
+                pane.moveTab(from: sourceIndex, to: targetIndex)
+            }
+        } else {
+            // Different pane - transfer
+            withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
+                bonsplitController.moveTab(
+                    Tab(from: draggedTab),
+                    from: sourceId,
+                    to: pane.id,
+                    atIndex: targetIndex
+                )
             }
         }
 
@@ -431,14 +440,6 @@ struct TabDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [.text])
-    }
-
-    private func decodeTransfer(from string: String) -> TabTransferData? {
-        guard let data = string.data(using: .utf8),
-              let transfer = try? JSONDecoder().decode(TabTransferData.self, from: data) else {
-            return nil
-        }
-        return transfer
+        info.hasItemsConforming(to: [.bonsplitTab])
     }
 }

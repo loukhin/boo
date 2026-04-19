@@ -25,6 +25,9 @@ struct SplitNodeView<Content: View>: View {
                 showSplitButtons: showSplitButtons,
                 contentViewLifecycle: contentViewLifecycle
             )
+            // Use pane ID as view identity to help SwiftUI track this
+            // pane across split tree restructuring.
+            .id(paneState.id)
 
         case .split(let splitState):
             SplitContainerView(
@@ -36,6 +39,8 @@ struct SplitNodeView<Content: View>: View {
                 onGeometryChange: onGeometryChange,
                 onDividerDragEnd: onDividerDragEnd
             )
+            // Use split ID as view identity.
+            .id(splitState.id)
         }
     }
 }

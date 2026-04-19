@@ -256,6 +256,126 @@ public final class BonsplitController {
         return newPaneId
     }
 
+    /// Split a pane by moving an existing tab into a new adjacent pane.
+    ///
+    /// Unlike `splitPane(withTab:)` which creates a fresh tab, this moves
+    /// an existing tab from `sourcePaneId` into a newly-created pane. Used
+    /// by drag-drop onto pane edges.
+    ///
+    /// Fires: `didSplitPane`, `didFocusPane`, `didSelectTab`, and
+    /// `didClosePane` if the source pane becomes empty.
+    @discardableResult
+    public func splitPaneWithMovedTab(
+        _ tab: Tab,
+        from sourcePaneId: PaneID,
+        targetPaneId: PaneID,
+        orientation: SplitOrientation,
+        insertFirst: Bool
+    ) -> PaneID? {
+        guard configuration.allowSplits else { return nil }
+
+        // Check with delegate
+        if delegate?.splitTabBar(self, shouldSplitPane: targetPaneId, orientation: orientation) == false {
+            return nil
+        }
+
+        // Snapshot panes before mutation
+        let panesBefore = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
+
+        guard let sourcePane = internalController.rootNode?.findPane(sourcePaneId) else {
+            return nil
+        }
+
+        // When source == target, we need to split first THEN remove the tab
+        // from the original pane. Otherwise we'd be trying to split an empty pane.
+        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+
+        if sourcePaneId == targetPaneId {
+            // Same-pane drag: split the pane, move the dragged tab to the new
+            // pane, and create a fresh terminal in the original pane.
+            //
+            // Wrap in withTransaction to disable animations during the
+            // structural change. This prevents SwiftUI from running view
+            // lifecycle callbacks (onAppear/onDisappear) multiple times
+            // as it animates between states.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            
+            withTransaction(transaction) {
+                // 1. Split creates a new empty pane
+                internalController.splitPane(targetPaneId, orientation: orientation, with: nil, insertFirst: insertFirst)
+            }
+            
+            guard let newPaneId = internalController.focusedPaneId,
+                  let newPane = internalController.rootNode?.findPane(newPaneId) else {
+                return nil
+            }
+            
+            withTransaction(transaction) {
+                // 2. Move the dragged tab from source to new pane
+                sourcePane.removeTab(tab.id.id)
+                newPane.addTab(internalTab)
+                newPane.selectTab(tab.id.id)
+            }
+            
+            // 3. Focus the new pane (where the dragged tab went)
+            delegate?.splitTabBar(self, didFocusPane: newPaneId)
+            delegate?.splitTabBar(self, didSelectTab: tab, inPane: newPaneId)
+            
+            // 4. Only create a new terminal in the original pane if it's now empty.
+            //    If it still has other tabs, they remain and we don't need a new terminal.
+            if sourcePane.tabs.isEmpty {
+                let emptyPaneId = sourcePaneId
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.splitTabBar(self, didSplitPane: newPaneId, newPane: emptyPaneId, orientation: orientation)
+                }
+            }
+            
+            return newPaneId
+        } else {
+            // Different panes: close empty source first (if applicable),
+            // then split target with the tab. This avoids two separate
+            // structural changes that confuse SwiftUI.
+            sourcePane.removeTab(tab.id.id)
+            let sourceWillClose = sourcePane.tabs.isEmpty
+            
+            // Close source pane BEFORE the split so there's only one
+            // structural change to the tree
+            if sourceWillClose {
+                internalController.closePane(sourcePaneId)
+                delegate?.splitTabBar(self, didClosePane: sourcePaneId)
+            }
+            
+            internalController.splitPaneWithTab(
+                targetPaneId,
+                orientation: orientation,
+                tab: internalTab,
+                insertFirst: insertFirst
+            )
+            
+            guard let newPaneId = focusedPaneId else { return nil }
+            
+            // Fire delegate callbacks
+            delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
+            delegate?.splitTabBar(self, didFocusPane: newPaneId)
+            delegate?.splitTabBar(self, didSelectTab: tab, inPane: newPaneId)
+            
+            // Fire didClosePane for any other panes that were removed
+            let panesAfter = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
+            for removed in panesBefore.subtracting(panesAfter) where removed != sourcePaneId.id {
+                delegate?.splitTabBar(self, didClosePane: PaneID(id: removed))
+            }
+            
+            // Notify geometry change after a brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.notifyGeometryChange()
+            }
+            
+            return newPaneId
+        }
+    }
+
     /// Close a specific pane
     /// - Parameter paneId: The pane to close
     /// - Returns: true if the pane was closed, false if vetoed by delegate

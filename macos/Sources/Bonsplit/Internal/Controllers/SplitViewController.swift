@@ -52,13 +52,14 @@ final class SplitViewController {
     // MARK: - Split Operations
 
     /// Split the specified pane in the given orientation
-    func splitPane(_ paneId: PaneID, orientation: SplitOrientation, with newTab: TabItem? = nil) {
+    func splitPane(_ paneId: PaneID, orientation: SplitOrientation, with newTab: TabItem? = nil, insertFirst: Bool = false) {
         guard let currentRoot = rootNode else { return }
         rootNode = splitNodeRecursively(
             node: currentRoot,
             targetPaneId: paneId,
             orientation: orientation,
-            newTab: newTab
+            newTab: newTab,
+            insertFirst: insertFirst
         )
     }
 
@@ -66,7 +67,8 @@ final class SplitViewController {
         node: SplitNode,
         targetPaneId: PaneID,
         orientation: SplitOrientation,
-        newTab: TabItem?
+        newTab: TabItem?,
+        insertFirst: Bool
     ) -> SplitNode {
         switch node {
         case .pane(let paneState):
@@ -80,13 +82,26 @@ final class SplitViewController {
                 }
 
                 // Start with divider at the edge so there's no flash before animation
-                let splitState = SplitState(
-                    orientation: orientation,
-                    first: .pane(paneState),
-                    second: .pane(newPane),
-                    dividerPosition: 1.0,  // Start at edge (will animate to 0.5)
-                    animationOrigin: .fromSecond  // New pane slides in from right/bottom
-                )
+                let splitState: SplitState
+                if insertFirst {
+                    // New pane goes first (left or top) - starts at 0, animates to 0.5
+                    splitState = SplitState(
+                        orientation: orientation,
+                        first: .pane(newPane),
+                        second: .pane(paneState),
+                        dividerPosition: 0.0,
+                        animationOrigin: .fromFirst
+                    )
+                } else {
+                    // New pane goes second (right or bottom) - starts at 1, animates to 0.5
+                    splitState = SplitState(
+                        orientation: orientation,
+                        first: .pane(paneState),
+                        second: .pane(newPane),
+                        dividerPosition: 1.0,
+                        animationOrigin: .fromSecond
+                    )
+                }
 
                 // Focus the new pane
                 focusedPaneId = newPane.id
@@ -100,13 +115,15 @@ final class SplitViewController {
                 node: splitState.first,
                 targetPaneId: targetPaneId,
                 orientation: orientation,
-                newTab: newTab
+                newTab: newTab,
+                insertFirst: insertFirst
             )
             splitState.second = splitNodeRecursively(
                 node: splitState.second,
                 targetPaneId: targetPaneId,
                 orientation: orientation,
-                newTab: newTab
+                newTab: newTab,
+                insertFirst: insertFirst
             )
             return .split(splitState)
         }
@@ -193,7 +210,17 @@ final class SplitViewController {
         let (newRoot, siblingPaneId) = closePaneRecursively(node: currentRoot, targetPaneId: paneId)
 
         rootNode = newRoot
-        focusedPaneId = siblingPaneId ?? newRoot?.allPaneIds.first
+        
+        // Only change focusedPaneId if we're closing the currently focused pane.
+        // Otherwise, keep the existing focus (e.g., after a tab move, the target
+        // pane should stay focused even when the empty source pane closes).
+        if focusedPaneId == paneId {
+            focusedPaneId = siblingPaneId ?? newRoot?.allPaneIds.first
+        } else if let currentFocus = focusedPaneId,
+                  newRoot?.findPane(currentFocus) == nil {
+            // The focused pane no longer exists (shouldn't happen normally)
+            focusedPaneId = siblingPaneId ?? newRoot?.allPaneIds.first
+        }
     }
 
     private func closePaneRecursively(
@@ -280,9 +307,16 @@ final class SplitViewController {
         // Focus target pane
         focusPane(targetPaneId)
 
-        // If source pane is now empty, close it
+        // If source pane is now empty, close it. We defer this with a
+        // longer delay to give SwiftUI time to fully settle the view
+        // hierarchy after the tab move. Without sufficient delay, the
+        // structural change (split → single pane) can confuse SwiftUI's
+        // view identity reconciliation and cause views to unmount.
         if sourcePane.tabs.isEmpty {
-            closePane(sourcePaneId)
+            let paneToClose = sourcePaneId
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.closePane(paneToClose)
+            }
         }
     }
 
