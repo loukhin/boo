@@ -49,7 +49,7 @@ pub fn init(
     };
 
     const env = try std.process.getEnvMap(b.allocator);
-    const app_path = b.fmt("macos/build/{s}/Ghostty.app", .{xc_config});
+    const app_path = b.fmt("macos/build/{s}/Boo.app", .{xc_config});
 
     // Our step to build the Ghostty macOS app.
     const build = build: {
@@ -66,7 +66,7 @@ pub fn init(
         step.addArgs(&.{
             "xcodebuild",
             "-target",
-            "Ghostty",
+            "Boo",
             "-configuration",
             xc_config,
         });
@@ -74,6 +74,12 @@ pub fn init(
         // If we have a specific architecture, we need to pass it
         // to xcodebuild.
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
+
+        // Pass version info as build settings
+        var version_buf: [64]u8 = undefined;
+        const version_str = std.fmt.bufPrint(&version_buf, "{f}", .{config.version}) catch "0.0.0";
+        step.addArg(b.fmt("BOO_BUILD={s}", .{version_str}));
+        step.addArg(b.fmt("BOO_COMMIT={s}", .{config.version.build orelse "unknown"}));
 
         // We need the xcframework
         deps.xcframework.addStepDependencies(&step.step);

@@ -591,6 +591,10 @@ extension BooState: BonsplitDelegate {
         didCloseTab tabId: TabID,
         fromPane pane: PaneID
     ) {
+        // Break retain cycle between SurfaceView and SurfaceScrollView
+        if let surface = surfaces[tabId] {
+            surface.cachedScrollView = nil
+        }
         surfaces.removeValue(forKey: tabId)
         surfaceSubscriptions.removeValue(forKey: tabId)
         updateWindowChromeTabId()
@@ -622,9 +626,9 @@ extension BooState: BonsplitDelegate {
         _ controller: BonsplitController,
         didClosePane paneId: PaneID
     ) {
-        // Only refocus if we're not already in the middle of a focus change.
-        // During tab moves, focus is set before the empty pane closes.
-        let shouldRefocus = !isChangingFocus
+        // Capture flags now - they may change by the time async runs.
+        let shouldRefocus = !isChangingFocus && !isDraggingTabOut
+        
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if shouldRefocus {
@@ -662,20 +666,18 @@ extension BooState: BonsplitDelegate {
             return
         }
 
-        // Keybind/menu split: create a fresh surface in the new pane.
-        // For drag-drop splits (cfg is nil), don't focus the new surface
-        // because the user expects focus to follow the dragged tab.
-        let isDragDropSplit = (cfg == nil)
-        guard let tabId = newTab(inPane: newPane, baseConfig: cfg, focusAfterCreate: !isDragDropSplit),
+        // Create a fresh surface in the new pane.
+        // Note: drag-drop splits are handled above (existing tabs check).
+        guard let tabId = newTab(inPane: newPane, baseConfig: cfg, focusAfterCreate: true),
               let newSurface = surfaces[tabId] else {
             return
         }
 
-        // For keybind/menu splits, also move AppKit first responder.
-        if !isDragDropSplit, let source, source !== newSurface {
+        // Move AppKit first responder to the new surface.
+        if let source, source !== newSurface {
             Ghostty.moveFocus(to: newSurface, from: source)
-            focusedOwnedSurface = newSurface
         }
+        focusedOwnedSurface = newSurface
     }
 
     /// Create a surface for tabs created by Bonsplit (e.g. + button in tab bar).
@@ -703,11 +705,18 @@ extension BooState: BonsplitDelegate {
         didSelectTab tab: Tab,
         inPane pane: PaneID
     ) {
+        // Capture flag now - it may change by the time async runs.
+        let wasDraggingOut = isDraggingTabOut
+        
         // Defer one runloop tick so SwiftUI/AppKit finish any tab reparenting
         // first (notably drag-dropping a tab onto another pane's tab bar).
         DispatchQueue.main.async { [weak self] in
-            self?.focusSurface(for: tab.id)
-            self?.updateWindowChromeTabId()
+            guard let self else { return }
+            // Skip focus if this was triggered by drag-out (focus goes to new window).
+            if !wasDraggingOut {
+                self.focusSurface(for: tab.id)
+            }
+            self.updateWindowChromeTabId()
         }
     }
 

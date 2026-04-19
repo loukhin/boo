@@ -47,9 +47,9 @@
 		</dict>
 	</array>
 	<key>BooBuild</key>
-	<string></string>
+	<string>$(BOO_BUILD)</string>
 	<key>BooCommit</key>
-	<string></string>
+	<string>$(BOO_COMMIT)</string>
 	<key>LSEnvironment</key>
 	<dict>
 		<key>GHOSTTY_MAC_LAUNCH_SOURCE</key>
