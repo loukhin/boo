@@ -4,12 +4,12 @@ import Foundation
 enum TabBarMetrics {
     // MARK: - Tab Bar
 
-    static let barHeight: CGFloat = 27
+    static let barHeight: CGFloat = 30
     static let barTrailingPadding: CGFloat = 64
 
     // MARK: - Individual Tabs
 
-    static let tabHeight: CGFloat = 26
+    static let tabHeight: CGFloat = 29
     static let tabMinWidth: CGFloat = 80
     static let tabMaxWidth: CGFloat = 220
     /// Max width for the title text itself. Long shell-reported titles
