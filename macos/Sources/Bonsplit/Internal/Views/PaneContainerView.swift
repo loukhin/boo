@@ -49,7 +49,6 @@ struct PaneContainerView<Content: View>: View {
             contentAreaWithDropZones
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
     }
 
     // MARK: - Content Area with Drop Zones

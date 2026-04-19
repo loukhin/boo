@@ -6,11 +6,16 @@ enum TabBarColors {
     // MARK: - Tab Bar Background
 
     static var barBackground: Color {
-        Color(nsColor: .windowBackgroundColor)
+        .clear
     }
 
     static var barMaterial: Material {
         .bar
+    }
+    
+    /// Whether the tab bar should be transparent (let window background show through)
+    static var isTransparent: Bool {
+        true
     }
 
     // MARK: - Tab States
@@ -34,7 +39,7 @@ enum TabBarColors {
     }
 
     static var inactiveText: Color {
-        Color(nsColor: .secondaryLabelColor)
+        Color(nsColor: .labelColor).opacity(0.7)
     }
 
     // MARK: - Borders & Indicators

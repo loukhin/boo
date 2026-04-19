@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import GhosttyKit
+import Combine
 
 /// Step 1 Boo window controller.
 ///
@@ -18,6 +19,7 @@ final class BooController: NSWindowController {
     static private(set) var all: [BooController] = []
 
     let state: BooState
+    private let ghostty: Ghostty.App
 
     // MARK: - Factory
 
@@ -33,6 +35,7 @@ final class BooController: NSWindowController {
     // MARK: - Lifecycle
 
     init(ghostty: Ghostty.App) {
+        self.ghostty = ghostty
         self.state = BooState(ghostty: ghostty)
 
         let window = NSWindow(
@@ -44,11 +47,15 @@ final class BooController: NSWindowController {
         window.title = "Boo"
         window.center()
         window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true
 
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
 
         super.init(window: window)
+
+        // Apply initial window theme
+        applyWindowTheme()
 
         // Let BooState know which window it lives in so it can filter
         // app-level ghostty notifications to the key window.
@@ -56,10 +63,39 @@ final class BooController: NSWindowController {
 
         window.delegate = self
         BooController.all.append(self)
+        
+        // Listen for config changes
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(ghosttyConfigDidChange(_:)),
+            name: .ghosttyConfigDidChange,
+            object: nil
+        )
     }
 
     required init?(coder: NSCoder) {
         fatalError("BooController does not support NSCoder")
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+    
+    // MARK: - Window Theming
+    
+    private func applyWindowTheme() {
+        guard let window else { return }
+        if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
+            window.appearance = appearance
+        }
+        window.backgroundColor = NSColor(ghostty.config.backgroundColor)
+    }
+    
+    @objc private func ghosttyConfigDidChange(_ notification: Notification) {
+        // Delay slightly to ensure config values are updated
+        DispatchQueue.main.async { [weak self] in
+            self?.applyWindowTheme()
+        }
     }
 }
 

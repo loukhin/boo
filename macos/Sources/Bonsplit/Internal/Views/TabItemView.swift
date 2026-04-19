@@ -7,6 +7,7 @@ struct TabItemView: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
+    @Environment(\.terminalBackgroundColor) private var backgroundColor
     @State private var isHovered = false
     @State private var isCloseHovered = false
 
@@ -48,6 +49,16 @@ struct TabItemView: View {
         .padding(.bottom, isSelected ? 1 : 0)
         .background(tabBackground)
         .contentShape(Rectangle())
+        // Selected tab covers the tab bar's bottom border
+        .overlay(alignment: .bottom) {
+            if isSelected {
+                Rectangle()
+                    .fill(backgroundColor)
+                    .frame(height: 2)
+                    .offset(y: 1)
+            }
+        }
+        .zIndex(isSelected ? 1 : 0)
         .onTapGesture {
             onSelect()
         }
@@ -67,16 +78,8 @@ struct TabItemView: View {
     @ViewBuilder
     private var tabBackground: some View {
         ZStack(alignment: .top) {
-            // Background fill
-            if isSelected {
-                Rectangle()
-                    .fill(TabBarColors.activeTabBackground)
-            } else if isHovered {
-                Rectangle()
-                    .fill(TabBarColors.hoveredTabBackground)
-            } else {
-                Color.clear
-            }
+            // All tabs have transparent background
+            Color.clear
 
             // Top accent indicator for selected tab
             if isSelected {
@@ -107,8 +110,8 @@ struct TabItemView: View {
                     .frame(width: TabBarMetrics.dirtyIndicatorSize, height: TabBarMetrics.dirtyIndicatorSize)
             }
 
-            // Close button (shown on hover)
-            if isHovered || isCloseHovered {
+            // Close button (always shown for selected tab, on hover for others)
+            if isSelected || isHovered || isCloseHovered {
                 Button {
                     onClose()
                 } label: {

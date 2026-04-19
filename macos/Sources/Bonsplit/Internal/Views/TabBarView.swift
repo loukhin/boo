@@ -323,8 +323,14 @@ struct TabBarView: View {
 
     @ViewBuilder
     private var tabBarBackground: some View {
-        Rectangle()
-            .fill(isFocused ? TabBarColors.barBackground : TabBarColors.barBackground.opacity(0.95))
+        // Use clear background to let window background show through
+        // Both top and bottom borders on tab bar
+        Color.clear
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(TabBarColors.separator)
+                    .frame(height: 1)
+            }
             .overlay(alignment: .bottom) {
                 Rectangle()
                     .fill(TabBarColors.separator)

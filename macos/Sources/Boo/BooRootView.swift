@@ -56,6 +56,7 @@ struct BooRootView: View {
         // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
         // for config access (split dimming, resize overlay, etc.).
         .environmentObject(state.ghostty)
+        .environment(\.terminalBackgroundColor, state.terminalBackgroundColor)
         .frame(minWidth: 600, minHeight: 400)
     }
 }

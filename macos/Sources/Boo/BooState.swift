@@ -56,14 +56,17 @@ final class BooState: ObservableObject {
     
     /// Guard to prevent re-entrant focus changes. When true, focus-related
     /// callbacks are suppressed to avoid oscillation loops.
-    /// Guard to prevent re-entrant focus changes. When true, focus-related
-    /// callbacks are suppressed to avoid oscillation loops.
     @Published private(set) var isChangingFocus = false
+    
+    /// Terminal background color from config, updated on config reload.
+    /// Used by the tab bar to match the window background.
+    @Published private(set) var terminalBackgroundColor: Color
 
     private var tabCounter = 0
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
+        self.terminalBackgroundColor = ghostty.config.backgroundColor
 
         let config = BonsplitConfiguration(
             allowSplits: true,
@@ -289,6 +292,20 @@ final class BooState: ObservableObject {
             name: .ghosttySurfaceFocusDidChange,
             object: nil
         )
+        nc.addObserver(
+            self,
+            selector: #selector(onGhosttyConfigDidChange(_:)),
+            name: .ghosttyConfigDidChange,
+            object: nil
+        )
+    }
+    
+    @objc private func onGhosttyConfigDidChange(_ note: Notification) {
+        // Update background color from new config
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.terminalBackgroundColor = self.ghostty.config.backgroundColor
+        }
     }
 
     @objc private func onGhosttyNewTab(_ note: Notification) {
