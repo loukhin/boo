@@ -70,11 +70,16 @@ extension BooController: NSWindowDelegate {
         BooController.all.removeAll { $0 === self }
     }
 
-    /// When the window becomes key, push focus into the current tab's
-    /// surface so typing works without a click. Same pattern ghostty's
-    /// `BaseTerminalController` uses.
+    /// When the window becomes key, refocus the current surface so the
+    /// cursor becomes filled again.
     func windowDidBecomeKey(_ notification: Notification) {
-        state.focusCurrentTabSurface()
+        state.refocusCurrentSurface()
+    }
+    
+    /// When the window loses key status, unfocus the surface so the cursor
+    /// becomes hollow.
+    func windowDidResignKey(_ notification: Notification) {
+        state.unfocusAllSurfaces()
     }
 }
 

@@ -631,4 +631,23 @@ extension BooState: BonsplitDelegate {
         guard let tab = controller.selectedTab(inPane: paneId) else { return }
         focusSurface(for: tab.id)
     }
+    
+    /// Unfocus all surfaces when the window loses key status.
+    /// This makes cursors hollow to indicate the window is inactive.
+    /// Note: we don't clear focusedOwnedSurface so we can refocus it
+    /// when the window becomes key again.
+    func unfocusAllSurfaces() {
+        for surface in surfaces.values {
+            surface.focusDidChange(false)
+        }
+    }
+    
+    /// Refocus the current surface when the window becomes key.
+    func refocusCurrentSurface() {
+        if let surface = focusedOwnedSurface {
+            surface.focusDidChange(true)
+        } else {
+            focusCurrentTabSurface()
+        }
+    }
 }
