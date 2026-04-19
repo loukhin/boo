@@ -600,8 +600,10 @@ extension BooState: BonsplitDelegate {
         updateWindowChromeTabId()
 
         if surfaces.isEmpty {
-            // Defer the close to the next runloop tick so Bonsplit
-            // finishes its own bookkeeping before the window goes away.
+            // Hide immediately to avoid visible empty window, but defer
+            // the actual close so Bonsplit finishes its bookkeeping
+            // (important for drag-to-split where new panes are being created).
+            window?.orderOut(nil)
             DispatchQueue.main.async { [weak self] in
                 self?.window?.performClose(nil)
             }
@@ -667,17 +669,21 @@ extension BooState: BonsplitDelegate {
         }
 
         // Create a fresh surface in the new pane.
-        // Note: drag-drop splits are handled above (existing tabs check).
-        guard let tabId = newTab(inPane: newPane, baseConfig: cfg, focusAfterCreate: true),
+        // If the focused pane is different from newPane, this is the
+        // drag-to-split-within-same-pane async replacement for the
+        // emptied source pane — don't steal focus from the dragged tab.
+        let shouldFocus = (controller.focusedPaneId == newPane)
+        
+        guard let tabId = newTab(inPane: newPane, baseConfig: cfg, focusAfterCreate: shouldFocus),
               let newSurface = surfaces[tabId] else {
             return
         }
 
-        // Move AppKit first responder to the new surface.
-        if let source, source !== newSurface {
+        // Move AppKit first responder to the new surface only if it should focus.
+        if shouldFocus, let source, source !== newSurface {
             Ghostty.moveFocus(to: newSurface, from: source)
+            focusedOwnedSurface = newSurface
         }
-        focusedOwnedSurface = newSurface
     }
 
     /// Create a surface for tabs created by Bonsplit (e.g. + button in tab bar).

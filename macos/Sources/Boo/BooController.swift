@@ -32,6 +32,10 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     ) -> BooController {
         let c = BooController(ghostty: ghostty, baseConfig: baseConfig)
         c.showWindow(nil)
+        if let window = c.window, !window.styleMask.contains(.fullScreen) {
+            let initialSize = c.state.surfaces.values.first?.initialSize
+            applyCascade(to: window, initialSize: initialSize)
+        }
         return c
     }
 
@@ -132,6 +136,34 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         configureWindow()
     }
 
+    // Track cascade point for positioning new windows, like Ghostty does.
+    private static var lastCascadePoint = NSPoint(x: 0, y: 0)
+
+    private static func applyCascade(to window: NSWindow, initialSize: NSSize? = nil) {
+        // Apply initial size from ghostty config if provided.
+        if let size = initialSize {
+            window.setContentSize(size)
+        }
+        
+        if all.count > 1 {
+            // Cascade from last cascade point (matches Ghostty behavior).
+            lastCascadePoint = window.cascadeTopLeft(from: lastCascadePoint)
+        } else {
+            // First window: try to restore saved position, otherwise center.
+            let restored = window.setFrameUsingName("BooWindow")
+            if !restored {
+                window.center()
+            }
+            // Get cascade point. For restored windows, save frame first since
+            // cascadeTopLeft(from: .zero) might move it on some macOS versions.
+            let savedFrame = window.frame
+            lastCascadePoint = window.cascadeTopLeft(from: .zero)
+            if restored && window.frame != savedFrame {
+                window.setFrame(savedFrame, display: true)
+            }
+        }
+    }
+
     private static func makeWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
@@ -140,7 +172,6 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             defer: false
         )
         window.title = "Boo"
-        window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.collectionBehavior = [.fullScreenPrimary]
@@ -152,6 +183,9 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
+        
+        // Set autosave name AFTER content view to prevent SwiftUI override.
+        window.setFrameAutosaveName("BooWindow")
 
         // Apply initial window theme
         applyWindowTheme()
@@ -168,6 +202,14 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             self,
             selector: #selector(ghosttyConfigDidChange(_:)),
             name: .ghosttyConfigDidChange,
+            object: nil
+        )
+        
+        // Save window frame on app termination (Cmd+Q)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationWillTerminate(_:)),
+            name: NSApplication.willTerminateNotification,
             object: nil
         )
 
@@ -250,6 +292,14 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             size: defaultSize
         )
         window.setFrame(frame, display: true, animate: true)
+    }
+    
+    @objc private func applicationWillTerminate(_ notification: Notification) {
+        // Explicitly save all window frames on quit.
+        // setFrameAutosaveName auto-saves on move/resize, but not guaranteed on quit.
+        for controller in BooController.all {
+            controller.window?.saveFrame(usingName: "BooWindow")
+        }
     }
 }
 
@@ -382,6 +432,24 @@ extension BooController {
 extension BooController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         BooController.all.removeAll { $0 === self }
+        
+        // Update cascade point like Ghostty does so the next window
+        // cascades from the remaining key window.
+        if let focusedWindow = NSApplication.shared.keyWindow {
+            if focusedWindow != window {
+                // Closing a non-key window: cascade from the key window.
+                // Save and restore frame to avoid macOS 15 window snapping issues.
+                let oldFrame = focusedWindow.frame
+                Self.lastCascadePoint = focusedWindow.cascadeTopLeft(from: .zero)
+                if focusedWindow.frame != oldFrame {
+                    focusedWindow.setFrame(oldFrame, display: true)
+                }
+            } else {
+                // Closing the key window: use its position for next window.
+                let frame = focusedWindow.frame
+                Self.lastCascadePoint = NSPoint(x: frame.minX, y: frame.maxY)
+            }
+        }
     }
 
     /// When the window becomes key, refocus the current surface so the
