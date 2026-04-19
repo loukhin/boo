@@ -828,12 +828,30 @@ extension BooState: BonsplitDelegate {
         }
     }
     
+    /// Inherited surface config from the currently focused surface for a
+    /// given creation context (window/tab/split). Returns nil when no owned
+    /// surface is focused, in which case ghostty falls back to normal defaults.
+    func inheritedConfigForFocusedSurface(
+        context: ghostty_surface_context_e
+    ) -> Ghostty.SurfaceConfiguration? {
+        guard let cSurface = focusedOwnedSurface?.surface else { return nil }
+        return Ghostty.SurfaceConfiguration(
+            from: ghostty_surface_inherited_config(cSurface, context)
+        )
+    }
+
     /// Split the current pane in the given direction.
     func splitCurrentPane(direction: SplitDirection) {
         guard let paneId = controller.focusedPaneId,
               let tab = controller.selectedTab(inPane: paneId),
               let surface = surfaces[tab.id] else { return }
-        splitPane(from: surface, direction: ghosttyDirection(for: direction), baseConfig: nil)
+        splitPane(
+            from: surface,
+            direction: ghosttyDirection(for: direction),
+            baseConfig: inheritedConfigForFocusedSurface(
+                context: GHOSTTY_SURFACE_CONTEXT_SPLIT
+            )
+        )
     }
     
     /// Convert our SplitDirection to ghostty's split direction.
