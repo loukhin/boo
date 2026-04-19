@@ -11,6 +11,7 @@ zig-cache/
 .zig-cache/
 zig-out/
 build-cmake/
+macos/build/
 CMakeCache.txt
 CMakeFiles/
 /build.zig.zon.bak
