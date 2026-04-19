@@ -1242,8 +1242,14 @@ extension AppDelegate {
 
 extension AppDelegate {
     func syncFloatOnTopMenu(_ window: NSWindow?) {
-        guard let window = (window ?? NSApp.keyWindow) as? TerminalWindow else {
-            // If some other window became key we always turn this off
+        guard let window = window ?? NSApp.keyWindow else {
+            self.menuFloatOnTop?.state = .off
+            return
+        }
+        
+        // Only sync for terminal windows (TerminalWindow or BooController)
+        let isTerminalWindow = window is TerminalWindow || window.windowController is BooController
+        guard isTerminalWindow else {
             self.menuFloatOnTop?.state = .off
             return
         }
@@ -1297,7 +1303,8 @@ extension AppDelegate: NSMenuItemValidation {
             #selector(useAsDefault(_:)):
             // Float on top items only active if the key window is a primary
             // terminal window (not quick terminal).
-            return NSApp.keyWindow is TerminalWindow
+            return NSApp.keyWindow is TerminalWindow ||
+                   NSApp.keyWindow?.windowController is BooController
 
         case #selector(undo(_:)):
             if undoManager.canUndo {

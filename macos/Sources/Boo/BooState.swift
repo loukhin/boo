@@ -54,6 +54,9 @@ final class BooState: ObservableObject {
     /// source surface explicitly.
     private weak var focusedOwnedSurface: Ghostty.SurfaceView?
     
+    /// Public access to the focused surface for menu actions.
+    var focusedSurface: Ghostty.SurfaceView? { focusedOwnedSurface }
+    
     /// Guard to prevent re-entrant focus changes. When true, focus-related
     /// callbacks are suppressed to avoid oscillation loops.
     @Published private(set) var isChangingFocus = false
@@ -667,4 +670,104 @@ extension BooState: BonsplitDelegate {
             focusCurrentTabSurface()
         }
     }
+    
+    // MARK: - Menu Action Helpers
+    
+    /// Close the current tab in the focused pane.
+    func closeCurrentTab() {
+        guard let paneId = controller.focusedPaneId,
+              let tab = controller.selectedTab(inPane: paneId) else { return }
+        _ = controller.closeTab(tab.id)
+    }
+    
+    /// Close the current pane. If only one pane exists, closes the current tab.
+    func closeCurrentPane() {
+        // If there's only one pane, close the current tab instead
+        if controller.allPaneIds.count <= 1 {
+            closeCurrentTab()
+        } else {
+            // Close the focused pane
+            guard let paneId = controller.focusedPaneId else { return }
+            _ = controller.closePane(paneId)
+        }
+    }
+    
+    /// Split the current pane in the given direction.
+    func splitCurrentPane(direction: SplitDirection) {
+        guard let paneId = controller.focusedPaneId,
+              let tab = controller.selectedTab(inPane: paneId),
+              let surface = surfaces[tab.id] else { return }
+        splitPane(from: surface, direction: ghosttyDirection(for: direction), baseConfig: nil)
+    }
+    
+    /// Convert our SplitDirection to ghostty's split direction.
+    private func ghosttyDirection(for direction: SplitDirection) -> ghostty_action_split_direction_e {
+        switch direction {
+        case .right: return GHOSTTY_SPLIT_DIRECTION_RIGHT
+        case .left: return GHOSTTY_SPLIT_DIRECTION_LEFT
+        case .down: return GHOSTTY_SPLIT_DIRECTION_DOWN
+        case .up: return GHOSTTY_SPLIT_DIRECTION_UP
+        }
+    }
+    
+    /// Adjust font size for all surfaces.
+    func adjustFontSize(delta: Int) {
+        for surface in surfaces.values {
+            if let s = surface.surface {
+                let change: Ghostty.App.FontSizeModification = delta > 0
+                    ? .increase(delta)
+                    : .decrease(-delta)
+                ghostty.changeFontSize(surface: s, change)
+            }
+        }
+    }
+    
+    /// Reset font size for all surfaces.
+    func resetFontSize() {
+        for surface in surfaces.values {
+            if let s = surface.surface {
+                ghostty.changeFontSize(surface: s, .reset)
+            }
+        }
+    }
+    
+    /// Navigate between Bonsplit panes.
+    func navigatePanes(direction: PaneNavigationDirection) {
+        switch direction {
+        case .left:
+            controller.navigateFocus(direction: .left)
+        case .right:
+            controller.navigateFocus(direction: .right)
+        case .up:
+            controller.navigateFocus(direction: .up)
+        case .down:
+            controller.navigateFocus(direction: .down)
+        case .previous, .next:
+            // For previous/next, cycle through panes in order
+            let panes = controller.allPaneIds
+            guard panes.count > 1,
+                  let currentPane = controller.focusedPaneId,
+                  let currentIndex = panes.firstIndex(of: currentPane) else { return }
+            
+            let nextIndex: Int
+            if direction == .next {
+                nextIndex = (currentIndex + 1) % panes.count
+            } else {
+                nextIndex = (currentIndex - 1 + panes.count) % panes.count
+            }
+            controller.focusPane(panes[nextIndex])
+        }
+        // Focus the surface in the newly focused pane
+        focusCurrentTabSurface()
+    }
+}
+
+/// Direction for splitting panes.
+enum SplitDirection {
+    case right, left, down, up
+}
+
+/// Direction for pane navigation.
+enum PaneNavigationDirection {
+    case left, right, up, down, previous, next
 }

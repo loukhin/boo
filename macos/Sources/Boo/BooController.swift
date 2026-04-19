@@ -13,7 +13,7 @@ import Combine
 /// For now tabs contain a placeholder SwiftUI view so we can verify the
 /// Bonsplit UI opens cleanly alongside (or instead of) a normal Ghostty
 /// window.
-final class BooController: NSWindowController {
+final class BooController: NSWindowController, NSMenuItemValidation {
     /// All live Boo controllers, so `AppDelegate` can check emptiness the
     /// same way it does for `TerminalController.all`.
     static private(set) var all: [BooController] = []
@@ -48,6 +48,7 @@ final class BooController: NSWindowController {
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
+        window.collectionBehavior = [.fullScreenPrimary]
 
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
@@ -69,6 +70,30 @@ final class BooController: NSWindowController {
             self,
             selector: #selector(ghosttyConfigDidChange(_:)),
             name: .ghosttyConfigDidChange,
+            object: nil
+        )
+        
+        // Listen for fullscreen toggle from keybindings
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onToggleFullscreen(_:)),
+            name: Ghostty.Notification.ghosttyToggleFullscreen,
+            object: nil
+        )
+        
+        // Listen for close window from keybindings
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onCloseWindow(_:)),
+            name: .ghosttyCloseWindow,
+            object: nil
+        )
+        
+        // Listen for reset window size from keybindings
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onResetWindowSize(_:)),
+            name: .ghosttyResetWindowSize,
             object: nil
         )
     }
@@ -95,6 +120,161 @@ final class BooController: NSWindowController {
         // Delay slightly to ensure config values are updated
         DispatchQueue.main.async { [weak self] in
             self?.applyWindowTheme()
+        }
+    }
+    
+    @objc private func onToggleFullscreen(_ notification: Notification) {
+        // Check if the notification is from a surface we own
+        guard let surface = notification.object as? Ghostty.SurfaceView,
+              state.surfaces.values.contains(where: { $0 === surface }) else { return }
+        
+        window?.toggleFullScreen(nil)
+    }
+    
+    @objc private func onCloseWindow(_ notification: Notification) {
+        // Check if the notification is from a surface we own
+        guard let surface = notification.object as? Ghostty.SurfaceView,
+              state.surfaces.values.contains(where: { $0 === surface }) else { return }
+        
+        window?.close()
+    }
+    
+    @objc private func onResetWindowSize(_ notification: Notification) {
+        // Check if the notification is from a surface we own
+        guard let surface = notification.object as? Ghostty.SurfaceView,
+              state.surfaces.values.contains(where: { $0 === surface }) else { return }
+        
+        // Reset to default size (900x600)
+        guard let window else { return }
+        let defaultSize = NSSize(width: 900, height: 600)
+        let frame = NSRect(
+            origin: window.frame.origin,
+            size: defaultSize
+        )
+        window.setFrame(frame, display: true, animate: true)
+    }
+}
+
+// MARK: - Menu Actions
+
+extension BooController {
+    @objc func newWindow(_ sender: Any?) {
+        _ = BooController.newWindow(ghostty)
+    }
+    
+    @objc func newTab(_ sender: Any?) {
+        state.newTab()
+    }
+    
+    @objc func closeTab(_ sender: Any?) {
+        state.closeCurrentTab()
+    }
+    
+    @objc func close(_ sender: Any?) {
+        // Close current split pane, or tab if no splits
+        state.closeCurrentPane()
+    }
+    
+    @objc func closeWindow(_ sender: Any?) {
+        window?.close()
+    }
+    
+    @objc func splitRight(_ sender: Any?) {
+        state.splitCurrentPane(direction: .right)
+    }
+    
+    @objc func splitLeft(_ sender: Any?) {
+        state.splitCurrentPane(direction: .left)
+    }
+    
+    @objc func splitDown(_ sender: Any?) {
+        state.splitCurrentPane(direction: .down)
+    }
+    
+    @objc func splitUp(_ sender: Any?) {
+        state.splitCurrentPane(direction: .up)
+    }
+    
+    @objc func increaseFontSize(_ sender: Any?) {
+        state.adjustFontSize(delta: 1)
+    }
+    
+    @objc func decreaseFontSize(_ sender: Any?) {
+        state.adjustFontSize(delta: -1)
+    }
+    
+    @objc func resetFontSize(_ sender: Any?) {
+        state.resetFontSize()
+    }
+    
+    @objc func toggleGhosttyFullScreen(_ sender: Any?) {
+        window?.toggleFullScreen(sender)
+    }
+    
+    // MARK: - Window Menu Split Actions
+    
+    @objc func splitZoom(_ sender: Any?) {
+        // Boo doesn't support split zoom - no-op
+    }
+    
+    @objc func splitMoveFocusPrevious(_ sender: Any?) {
+        state.navigatePanes(direction: .previous)
+    }
+    
+    @objc func splitMoveFocusNext(_ sender: Any?) {
+        state.navigatePanes(direction: .next)
+    }
+    
+    @objc func splitMoveFocusAbove(_ sender: Any?) {
+        state.navigatePanes(direction: .up)
+    }
+    
+    @objc func splitMoveFocusBelow(_ sender: Any?) {
+        state.navigatePanes(direction: .down)
+    }
+    
+    @objc func splitMoveFocusLeft(_ sender: Any?) {
+        state.navigatePanes(direction: .left)
+    }
+    
+    @objc func splitMoveFocusRight(_ sender: Any?) {
+        state.navigatePanes(direction: .right)
+    }
+    
+    @objc func equalizeSplits(_ sender: Any?) {
+        // Boo doesn't support equalize splits - no-op
+    }
+    
+    @objc func moveSplitDividerUp(_ sender: Any?) {
+        // Boo doesn't support divider movement - no-op
+    }
+    
+    @objc func moveSplitDividerDown(_ sender: Any?) {
+        // Boo doesn't support divider movement - no-op
+    }
+    
+    @objc func moveSplitDividerLeft(_ sender: Any?) {
+        // Boo doesn't support divider movement - no-op
+    }
+    
+    @objc func moveSplitDividerRight(_ sender: Any?) {
+        // Boo doesn't support divider movement - no-op
+    }
+    
+    // MARK: - Menu Validation
+    
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(splitZoom(_:)),
+             #selector(equalizeSplits(_:)),
+             #selector(moveSplitDividerUp(_:)),
+             #selector(moveSplitDividerDown(_:)),
+             #selector(moveSplitDividerLeft(_:)),
+             #selector(moveSplitDividerRight(_:)):
+            // Disable unsupported split operations
+            return false
+        default:
+            return true
         }
     }
 }
