@@ -70,6 +70,15 @@ struct PaneContainerView<Content: View>: View {
                     .allowsHitTesting(false)
             }
             .frame(width: size.width, height: size.height)
+            // Clear the placeholder whenever a drag session ends, even if
+            // `dropExited` never fired on this pane (e.g. when the drop was
+            // handled by a sibling tab bar, or when the overlay unmounted
+            // because `draggingTab` was cleared before AppKit delivered the
+            // exit event). Without this, the blue zone overlay can get stuck
+            // on screen after a tab drag.
+            .onChange(of: controller.draggingTab == nil) { _, noDrag in
+                if noDrag { activeDropZone = nil }
+            }
         }
         .clipped()
     }
@@ -115,14 +124,22 @@ struct PaneContainerView<Content: View>: View {
         // terminal NSView, and any per-surface SwiftUI gesture all compete for
         // the same click. Keep this layer drop-only so surface clicks are owned
         // by the surface host instead of by an invisible full-pane overlay.
-        Color.clear
-            .onDrop(of: [.bonsplitTab], delegate: UnifiedPaneDropDelegate(
-                size: size,
-                pane: pane,
-                bonsplitController: bonsplitController,
-                controller: controller,
-                activeDropZone: $activeDropZone
-            ))
+        // Only mount the drop-zone overlay while a Bonsplit tab drag is in
+        // progress. When the overlay is present it registers an AppKit drag
+        // destination on the pane, which (even when it only accepts
+        // `.bonsplitTab`) shadows the terminal surface's own drag destination
+        // below it — breaking Finder file drops into the terminal. So we
+        // conditionally render it: no overlay = no registration.
+        if controller.draggingTab != nil {
+            Color.clear
+                .onDrop(of: [.bonsplitTab], delegate: UnifiedPaneDropDelegate(
+                    size: size,
+                    pane: pane,
+                    bonsplitController: bonsplitController,
+                    controller: controller,
+                    activeDropZone: $activeDropZone
+                ))
+        }
     }
 
     // MARK: - Drop Placeholder
