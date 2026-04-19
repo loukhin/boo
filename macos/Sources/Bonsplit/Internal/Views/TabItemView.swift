@@ -78,8 +78,14 @@ struct TabItemView: View {
     @ViewBuilder
     private var tabBackground: some View {
         ZStack(alignment: .top) {
-            // All tabs have transparent background
-            Color.clear
+            // Selected tab uses the terminal background so it visually
+            // connects to the pane below. Other tabs stay transparent so the
+            // (slightly lighter) tab-bar chrome shows through.
+            if isSelected {
+                backgroundColor
+            } else {
+                Color.clear
+            }
 
             // Top accent indicator for selected tab
             if isSelected {

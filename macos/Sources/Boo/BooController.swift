@@ -56,12 +56,12 @@ final class BooController: NSWindowController, NSMenuItemValidation {
                 y: position.y - windowSize.height / 2
             )
             window.setFrameOrigin(origin)
-            
+
             // Constrain to screen bounds
             if let screen = NSScreen.screens.first(where: { $0.frame.contains(position) }) ?? NSScreen.main {
                 var frame = window.frame
                 let visibleFrame = screen.visibleFrame
-                
+
                 // Ensure window fits within screen
                 if frame.maxX > visibleFrame.maxX {
                     frame.origin.x = visibleFrame.maxX - frame.width
@@ -75,10 +75,10 @@ final class BooController: NSWindowController, NSMenuItemValidation {
                 if frame.minY < visibleFrame.minY {
                     frame.origin.y = visibleFrame.minY
                 }
-                
+
                 window.setFrame(frame, display: true)
             }
-            
+
             // Make the new window key so the old window properly resigns
             window.makeKeyAndOrderFront(nil)
         }
@@ -144,7 +144,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         if let size = initialSize {
             window.setContentSize(size)
         }
-        
+
         if all.count > 1 {
             // Cascade from last cascade point (matches Ghostty behavior).
             lastCascadePoint = window.cascadeTopLeft(from: lastCascadePoint)
@@ -183,7 +183,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
-        
+
         // Set autosave name AFTER content view to prevent SwiftUI override.
         window.setFrameAutosaveName("BooWindow")
 
@@ -204,7 +204,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             name: .ghosttyConfigDidChange,
             object: nil
         )
-        
+
         // Save window frame on app termination (Cmd+Q)
         NotificationCenter.default.addObserver(
             self,
@@ -241,49 +241,65 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     required init?(coder: NSCoder) {
         fatalError("BooController does not support NSCoder")
     }
-    
+
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
-    
+
     // MARK: - Window Theming
-    
+
     private func applyWindowTheme() {
         guard let window else { return }
         if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
             window.appearance = appearance
         }
-        window.backgroundColor = NSColor(ghostty.config.backgroundColor)
+        window.backgroundColor = Self.chromeColor(for: ghostty.config.backgroundColor)
     }
-    
+
+    /// Slightly lighten the terminal background so the window chrome
+    /// (titlebar + empty tab-bar space) reads as a distinct surface above the
+    /// terminal panes, which still draw their own un-tinted background.
+    private static func chromeColor(for terminalBackground: Color) -> NSColor {
+        let base = NSColor(terminalBackground).usingColorSpace(.sRGB) ?? NSColor(terminalBackground)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        base.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let mix: CGFloat = 0.35
+        return NSColor(
+            srgbRed: r + (1.0 - r) * mix,
+            green: g + (1.0 - g) * mix,
+            blue: b + (1.0 - b) * mix,
+            alpha: a
+        )
+    }
+
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
         // Delay slightly to ensure config values are updated
         DispatchQueue.main.async { [weak self] in
             self?.applyWindowTheme()
         }
     }
-    
+
     @objc private func onToggleFullscreen(_ notification: Notification) {
         // Check if the notification is from a surface we own
         guard let surface = notification.object as? Ghostty.SurfaceView,
               state.surfaces.values.contains(where: { $0 === surface }) else { return }
-        
+
         window?.toggleFullScreen(nil)
     }
-    
+
     @objc private func onCloseWindow(_ notification: Notification) {
         // Check if the notification is from a surface we own
         guard let surface = notification.object as? Ghostty.SurfaceView,
               state.surfaces.values.contains(where: { $0 === surface }) else { return }
-        
+
         window?.close()
     }
-    
+
     @objc private func onResetWindowSize(_ notification: Notification) {
         // Check if the notification is from a surface we own
         guard let surface = notification.object as? Ghostty.SurfaceView,
               state.surfaces.values.contains(where: { $0 === surface }) else { return }
-        
+
         // Reset to default size (900x600)
         guard let window else { return }
         let defaultSize = NSSize(width: 900, height: 600)
@@ -293,7 +309,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         )
         window.setFrame(frame, display: true, animate: true)
     }
-    
+
     @objc private func applicationWillTerminate(_ notification: Notification) {
         // Explicitly save all window frames on quit.
         // setFrameAutosaveName auto-saves on move/resize, but not guaranteed on quit.
@@ -307,110 +323,119 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
 extension BooController {
     @objc func newWindow(_ sender: Any?) {
-        _ = BooController.newWindow(ghostty)
+        _ = BooController.newWindow(
+            ghostty,
+            withBaseConfig: state.inheritedConfigForFocusedSurface(
+                context: GHOSTTY_SURFACE_CONTEXT_WINDOW
+            )
+        )
     }
-    
+
     @objc func newTab(_ sender: Any?) {
-        state.newTab()
+        state.newTab(
+            baseConfig: state.inheritedConfigForFocusedSurface(
+                context: GHOSTTY_SURFACE_CONTEXT_TAB
+            )
+        )
     }
-    
+
     @objc func closeTab(_ sender: Any?) {
         state.closeCurrentTab()
     }
-    
+
     @objc func close(_ sender: Any?) {
         // Close current split pane, or tab if no splits
         state.closeCurrentPane()
     }
-    
+
     @objc func closeWindow(_ sender: Any?) {
         window?.close()
     }
-    
+
     @objc func splitRight(_ sender: Any?) {
         state.splitCurrentPane(direction: .right)
     }
-    
+
     @objc func splitLeft(_ sender: Any?) {
         state.splitCurrentPane(direction: .left)
     }
-    
+
     @objc func splitDown(_ sender: Any?) {
         state.splitCurrentPane(direction: .down)
     }
-    
+
     @objc func splitUp(_ sender: Any?) {
         state.splitCurrentPane(direction: .up)
     }
-    
+
     @objc func increaseFontSize(_ sender: Any?) {
         state.adjustFontSize(delta: 1)
     }
-    
+
     @objc func decreaseFontSize(_ sender: Any?) {
         state.adjustFontSize(delta: -1)
     }
-    
+
     @objc func resetFontSize(_ sender: Any?) {
         state.resetFontSize()
     }
-    
+
     @objc func toggleGhosttyFullScreen(_ sender: Any?) {
         window?.toggleFullScreen(sender)
     }
-    
+
     // MARK: - Window Menu Split Actions
-    
+
     @objc func splitZoom(_ sender: Any?) {
         // Boo doesn't support split zoom - no-op
     }
-    
+
     @objc func splitMoveFocusPrevious(_ sender: Any?) {
         state.navigatePanes(direction: .previous)
     }
-    
+
     @objc func splitMoveFocusNext(_ sender: Any?) {
         state.navigatePanes(direction: .next)
     }
-    
+
     @objc func splitMoveFocusAbove(_ sender: Any?) {
         state.navigatePanes(direction: .up)
     }
-    
+
     @objc func splitMoveFocusBelow(_ sender: Any?) {
         state.navigatePanes(direction: .down)
     }
-    
+
     @objc func splitMoveFocusLeft(_ sender: Any?) {
         state.navigatePanes(direction: .left)
     }
-    
+
     @objc func splitMoveFocusRight(_ sender: Any?) {
         state.navigatePanes(direction: .right)
     }
-    
+
     @objc func equalizeSplits(_ sender: Any?) {
         // Boo doesn't support equalize splits - no-op
     }
-    
+
     @objc func moveSplitDividerUp(_ sender: Any?) {
         // Boo doesn't support divider movement - no-op
     }
-    
+
     @objc func moveSplitDividerDown(_ sender: Any?) {
         // Boo doesn't support divider movement - no-op
     }
-    
+
     @objc func moveSplitDividerLeft(_ sender: Any?) {
         // Boo doesn't support divider movement - no-op
     }
-    
+
     @objc func moveSplitDividerRight(_ sender: Any?) {
         // Boo doesn't support divider movement - no-op
     }
-    
+
     // MARK: - Menu Validation
-    
+
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(splitZoom(_:)),
@@ -432,7 +457,7 @@ extension BooController {
 extension BooController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         BooController.all.removeAll { $0 === self }
-        
+
         // Update cascade point like Ghostty does so the next window
         // cascades from the remaining key window.
         if let focusedWindow = NSApplication.shared.keyWindow {
@@ -458,7 +483,7 @@ extension BooController: NSWindowDelegate {
         state.setWindowKey(true)
         state.refocusCurrentSurface()
     }
-    
+
     /// When the window loses key status, unfocus the surface so the cursor
     /// becomes hollow.
     func windowDidResignKey(_ notification: Notification) {

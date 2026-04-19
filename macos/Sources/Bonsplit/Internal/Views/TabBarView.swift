@@ -76,8 +76,14 @@ struct TabBarView: View {
 
                         // Drop zone after last tab - provides indicator anchor at content end
                         dropZoneAtEnd
+
+                        // Trailing padding rendered as a draggable chrome
+                        // zone instead of plain `.padding`, so when the tab
+                        // strip is short the space under the split buttons
+                        // still lets you drag the window and drop tabs at
+                        // the end instead of being a dead void.
+                        trailingPaddingDragZone
                     }
-                    .padding(.trailing, TabBarMetrics.barTrailingPadding)
                     .background(
                         GeometryReader { contentGeo in
                             Color.clear
@@ -263,6 +269,21 @@ struct TabBarView: View {
                     dropIndicator
                 }
             }
+    }
+
+    // MARK: - Trailing Padding Drag Zone
+
+    @ViewBuilder
+    private var trailingPaddingDragZone: some View {
+        WindowDragZoneView()
+            .frame(width: TabBarMetrics.barTrailingPadding, height: TabBarMetrics.tabHeight)
+            .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
+                targetIndex: pane.tabs.count,
+                pane: pane,
+                bonsplitController: controller,
+                controller: splitViewController,
+                dropTargetIndex: $dropTargetIndex
+            ))
     }
 
     // MARK: - Fixed Trailing Drop / Drag Band
