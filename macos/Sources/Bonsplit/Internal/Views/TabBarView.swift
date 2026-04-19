@@ -53,14 +53,14 @@ struct TabBarView: View {
     ///
     /// This is intentionally a bit wider than the buttons themselves so there
     /// is still some draggable empty chrome on the right.
-    private let splitButtonLaneWidth: CGFloat = 54
+    private let splitButtonLaneWidth: CGFloat = 70
     private let splitButtonTrailingInset: CGFloat = 6
 
     /// The portion of the trailing lane that should actually occlude tab
     /// content because the buttons visually occupy it. Keep this narrower than
     /// `splitButtonLaneWidth` so the lane still feels like titlebar chrome
     /// instead of a huge dead gap.
-    private let splitButtonMaskClearWidth: CGFloat = 48
+    private let splitButtonMaskClearWidth: CGFloat = 64
     private let splitButtonMaskFadeWidth: CGFloat = 12
 
 
@@ -260,6 +260,15 @@ struct TabBarView: View {
     @ViewBuilder
     private var splitButtons: some View {
         HStack(spacing: 4) {
+            Button {
+                _ = controller.createTab(inPane: pane.id)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .help("New Tab")
+
             Button {
                 controller.splitPane(pane.id, orientation: .horizontal)
             } label: {

@@ -101,8 +101,7 @@ final class BooState: ObservableObject {
         let surface = Ghostty.SurfaceView(app, baseConfig: baseConfig)
 
         guard let tabId = controller.createTab(
-            title: "Terminal",
-            icon: nil,
+            title: "👻",
             inPane: paneId
         ) else { return nil }
 
@@ -543,10 +542,24 @@ extension BooState: BonsplitDelegate {
         }
     }
 
-    // didCreateTab intentionally NOT implemented: surfaces are only created
-    // by `newTab()`, which focuses the surface itself after assigning it.
-    // If Bonsplit ever creates tabs on its own (e.g. via a + button in the
-    // tab bar), we'd need a different path for those.
+    /// Create a surface for tabs created by Bonsplit (e.g. + button in tab bar).
+    /// Tabs created via `newTab()` already have surfaces attached.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        didCreateTab tab: Tab,
+        inPane pane: PaneID
+    ) {
+        // Skip if this tab already has a surface (created via newTab)
+        guard surfaces[tab.id] == nil else { return }
+        guard let app = ghostty.app else { return }
+        
+        // Create a new surface for this tab
+        let surface = Ghostty.SurfaceView(app, baseConfig: nil, uuid: tab.id.id)
+        surfaces[tab.id] = surface
+        observeSurface(surface, forTab: tab.id)
+        focusSurface(for: tab.id)
+        updateWindowChromeTabId()
+    }
 
     /// Focus the surface when the user switches tabs.
     func splitTabBar(

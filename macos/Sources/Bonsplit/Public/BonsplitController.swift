@@ -39,8 +39,8 @@ public final class BonsplitController {
     /// - Returns: The TabID of the created tab, or nil if creation was vetoed by delegate
     @discardableResult
     public func createTab(
-        title: String,
-        icon: String? = "doc.text",
+        title: String = "👻",
+        icon: String? = nil,
         isDirty: Bool = false,
         inPane pane: PaneID? = nil
     ) -> TabID? {

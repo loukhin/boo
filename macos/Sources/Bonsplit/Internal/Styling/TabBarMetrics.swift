@@ -5,7 +5,7 @@ enum TabBarMetrics {
     // MARK: - Tab Bar
 
     static let barHeight: CGFloat = 27
-    static let barTrailingPadding: CGFloat = 48
+    static let barTrailingPadding: CGFloat = 64
 
     // MARK: - Individual Tabs
 
