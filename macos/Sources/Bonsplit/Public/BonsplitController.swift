@@ -20,6 +20,18 @@ public final class BonsplitController {
 
     internal var internalController: SplitViewController
 
+    // MARK: - Callbacks
+
+    /// Called when a tab is dragged outside any valid drop target (outside all app windows).
+    /// Use this to create a new window with the dragged tab's content.
+    public var onTabDragEndedOutside: ((Tab, PaneID, NSPoint?) -> Void)? {
+        didSet {
+            internalController.onTabDragEndedOutside = { [weak self] tabItem, paneId, point in
+                self?.onTabDragEndedOutside?(Tab(from: tabItem), paneId, point)
+            }
+        }
+    }
+
     // MARK: - Initialization
 
     /// Create a new controller with the specified configuration

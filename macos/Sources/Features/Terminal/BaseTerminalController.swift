@@ -762,11 +762,10 @@ class BaseTerminalController: NSWindowController,
         }
 
         replaceSurfaceTree(removedTree, moveFocusFrom: oldFocusedSurface)
-        _ = TerminalController.newWindow(
+        _ = BooController.newWindow(
             ghostty,
-            tree: newTree,
-            position: notification.userInfo?[Notification.Name.ghosttySurfaceDragEndedNoTargetPointKey] as? NSPoint,
-            confirmUndo: false)
+            withSurface: target,
+            position: notification.userInfo?[Notification.Name.ghosttySurfaceDragEndedNoTargetPointKey] as? NSPoint)
     }
 
     // MARK: Local Events

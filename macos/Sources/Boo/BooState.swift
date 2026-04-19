@@ -65,9 +65,15 @@ final class BooState: ObservableObject {
     /// Used by the tab bar to match the window background.
     @Published private(set) var terminalBackgroundColor: Color
 
+    /// Whether this window is currently the key window.
+    @Published private(set) var isWindowKey: Bool = true
+
+    /// Flag to skip auto-focus during tab drag-out operations.
+    private var isDraggingTabOut: Bool = false
+
     private var tabCounter = 0
 
-    init(ghostty: Ghostty.App) {
+    init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
         self.ghostty = ghostty
         self.terminalBackgroundColor = ghostty.config.backgroundColor
 
@@ -78,12 +84,70 @@ final class BooState: ObservableObject {
         )
         self.controller = BonsplitController(configuration: config)
         self.controller.delegate = self
+        setupTabDragOutCallback()
 
         subscribeToGhosttyNotifications()
 
         // Seed one initial tab so the window isn't empty on open.
         // Bonsplit starts with no panes; the first createTab bootstraps the tree.
-        newTab()
+        newTab(baseConfig: baseConfig)
+    }
+
+    /// Init with an existing surface (for drag-out-to-new-window).
+    init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
+        self.ghostty = ghostty
+        self.terminalBackgroundColor = ghostty.config.backgroundColor
+
+        let config = BonsplitConfiguration(
+            allowSplits: true,
+            allowCloseTabs: true,
+            contentViewLifecycle: .keepAllAlive
+        )
+        self.controller = BonsplitController(configuration: config)
+        self.controller.delegate = self
+        setupTabDragOutCallback()
+
+        subscribeToGhosttyNotifications()
+
+        // Adopt the existing surface instead of creating a new one.
+        adoptSurface(existingSurface)
+    }
+
+    /// Set up callback for when a tab is dragged outside all windows.
+    private func setupTabDragOutCallback() {
+        controller.onTabDragEndedOutside = { [weak self] tab, sourcePaneId, screenPoint in
+            self?.handleTabDraggedOutside(tab: tab, at: screenPoint)
+        }
+    }
+
+    /// Handle a tab being dragged outside all windows - create a new window.
+    private func handleTabDraggedOutside(tab: Tab, at screenPoint: NSPoint?) {
+        // Get the surface for this tab
+        guard let surface = surfaces[tab.id] else { return }
+
+        // Only drag out if there's more than one tab/split total
+        let totalTabs = controller.allPaneIds.reduce(0) { $0 + controller.tabs(inPane: $1).count }
+        guard totalTabs > 1 else { return }
+
+        // Set flag to skip auto-focus in didCloseTab
+        isDraggingTabOut = true
+        defer { isDraggingTabOut = false }
+
+        // Clear focusedOwnedSurface if it was the dragged surface
+        if focusedOwnedSurface === surface {
+            focusedOwnedSurface = nil
+        }
+
+        // Remove from our tracking
+        surfaces.removeValue(forKey: tab.id)
+        surfaceSubscriptions.removeValue(forKey: tab.id)
+        controller.closeTab(tab.id)
+
+        // Unfocus all surfaces in this window
+        unfocusAllSurfaces()
+
+        // Create new window with the dragged surface
+        _ = BooController.newWindow(ghostty, withSurface: surface, position: screenPoint)
     }
 
     deinit {
@@ -115,6 +179,30 @@ final class BooState: ObservableObject {
         // gives us the tabId then) and manually focus, because Bonsplit's
         // didCreateTab/didSelectTab hooks fire synchronously inside
         // createTab — at which point our map is still empty.
+        surfaces[tabId] = surface
+        observeSurface(surface, forTab: tabId)
+        if focusAfterCreate {
+            focusSurface(for: tabId)
+        }
+        updateWindowChromeTabId()
+        return tabId
+    }
+
+    /// Adopt an existing surface into a new tab (e.g., from drag-out).
+    /// Returns the tab ID if successful.
+    @discardableResult
+    func adoptSurface(
+        _ surface: Ghostty.SurfaceView,
+        inPane paneId: PaneID? = nil,
+        focusAfterCreate: Bool = true
+    ) -> TabID? {
+        tabCounter += 1
+
+        guard let tabId = controller.createTab(
+            title: surface.title.isEmpty ? "👻" : surface.title,
+            inPane: paneId
+        ) else { return nil }
+
         surfaces[tabId] = surface
         observeSurface(surface, forTab: tabId)
         if focusAfterCreate {
@@ -301,6 +389,12 @@ final class BooState: ObservableObject {
             name: .ghosttyConfigDidChange,
             object: nil
         )
+        nc.addObserver(
+            self,
+            selector: #selector(onGhosttySurfaceDragEndedNoTarget(_:)),
+            name: .ghosttySurfaceDragEndedNoTarget,
+            object: nil
+        )
     }
     
     @objc private func onGhosttyConfigDidChange(_ note: Notification) {
@@ -438,6 +532,27 @@ final class BooState: ObservableObject {
         }
     }
 
+    @objc private func onGhosttySurfaceDragEndedNoTarget(_ note: Notification) {
+        // Surface was dragged outside any valid drop target - create new window.
+        guard let surface = note.object as? Ghostty.SurfaceView,
+              let tabId = tabId(for: surface),
+              let app = ghostty.app else { return }
+
+        // Only handle if we have more than one tab/split, otherwise it's a no-op
+        // (dragging the only surface out of its window makes no sense).
+        let totalTabs = controller.allPaneIds.reduce(0) { $0 + controller.tabs(inPane: $1).count }
+        guard totalTabs > 1 else { return }
+
+        // Remove from our tracking
+        surfaces.removeValue(forKey: tabId)
+        surfaceSubscriptions.removeValue(forKey: tabId)
+        controller.closeTab(tabId)
+
+        // Create new window with the dragged surface
+        let position = note.userInfo?[Notification.Name.ghosttySurfaceDragEndedNoTargetPointKey] as? NSPoint
+        _ = BooController.newWindow(ghostty, withSurface: surface, position: position)
+    }
+
     /// Bonsplit's 4-way spatial navigation doesn't have a tree-order
     /// previous/next concept, so we approximate: `.previous` → `.left`,
     /// `.next` → `.right`. Users remapping those to vertical directions
@@ -486,9 +601,10 @@ extension BooState: BonsplitDelegate {
             DispatchQueue.main.async { [weak self] in
                 self?.window?.performClose(nil)
             }
-        } else if controller.focusedPaneId == pane {
+        } else if controller.focusedPaneId == pane && !isDraggingTabOut {
             // Focus the newly selected tab in this pane (if any).
             // This handles the case where the closed tab was focused.
+            // Skip this during drag-out since focus will move to new window.
             focusCurrentTabSurface(inPane: pane)
         }
         // Note: structural recovery (epoch bump, focus) is handled by
@@ -661,6 +777,11 @@ extension BooState: BonsplitDelegate {
             surface.focusDidChange(false)
         }
     }
+
+    /// Update window key state.
+    func setWindowKey(_ isKey: Bool) {
+        isWindowKey = isKey
+    }
     
     /// Refocus the current surface when the window becomes key.
     func refocusCurrentSurface() {
@@ -763,11 +884,11 @@ extension BooState: BonsplitDelegate {
 }
 
 /// Direction for splitting panes.
-enum SplitDirection {
+public enum SplitDirection {
     case right, left, down, up
 }
 
 /// Direction for pane navigation.
-enum PaneNavigationDirection {
+public enum PaneNavigationDirection {
     case left, right, up, down, previous, next
 }

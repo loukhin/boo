@@ -450,7 +450,7 @@ class AppDelegate: NSObject,
         guard applicationHasBecomeActive else { return true }
 
         // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        _ = BooController.newWindow(ghostty)
         return false
     }
 
@@ -518,12 +518,12 @@ class AppDelegate: NSObject,
 
         switch ghostty.config.macosDockDropBehavior {
         case .new_tab:
-            _ = TerminalController.newTab(
+            _ = BooController.newTab(
                 ghostty,
-                from: TerminalController.preferredParent?.window,
+                from: NSApp.keyWindow,
                 withBaseConfig: config
             )
-        case .new_window: _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        case .new_window: _ = BooController.newWindow(ghostty, withBaseConfig: config)
         }
 
         return true

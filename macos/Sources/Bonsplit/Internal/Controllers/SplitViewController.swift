@@ -18,6 +18,9 @@ final class SplitViewController {
     /// Source pane of the dragging tab
     var dragSourcePaneId: PaneID?
 
+    /// Callback when a tab drag ends outside any valid target
+    var onTabDragEndedOutside: ((TabItem, PaneID, NSPoint?) -> Void)?
+
     /// Current frame of the entire split view container
     var containerFrame: CGRect = .zero
 

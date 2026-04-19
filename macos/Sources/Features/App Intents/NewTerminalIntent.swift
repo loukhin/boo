@@ -107,35 +107,53 @@ struct NewTerminalIntent: AppIntent {
         }
         switch location {
         case .window:
-            let newController = TerminalController.newWindow(
+            let newController = BooController.newWindow(
                 ghostty,
-                withBaseConfig: config,
-                withParent: parent?.window)
-            if let view = newController.surfaceTree.root?.leftmostLeaf() {
+                withBaseConfig: config)
+            if let view = newController.state.focusedSurface {
                 return .result(value: TerminalEntity(view))
             }
 
         case .tab:
-            let newController = TerminalController.newTab(
+            let newController = BooController.newTab(
                 ghostty,
                 from: parent?.window,
                 withBaseConfig: config)
-            if let view = newController?.surfaceTree.root?.leftmostLeaf() {
+            if let view = newController?.state.focusedSurface {
                 return .result(value: TerminalEntity(view))
             }
 
         case .splitLeft, .splitRight, .splitUp, .splitDown:
-            guard let parent,
-                  let controller = parent.window?.windowController as? BaseTerminalController else {
+            guard let parent else {
                 throw GhosttyIntentError.surfaceNotFound
             }
 
-            if let view = controller.newSplit(
-                at: parent,
-                direction: location.splitDirection!,
-                baseConfig: config
-            ) {
-                return .result(value: TerminalEntity(view))
+            // Try BooController first
+            if let booController = parent.window?.windowController as? BooController {
+                let direction: SplitDirection = {
+                    switch location {
+                    case .splitLeft: return .left
+                    case .splitRight: return .right
+                    case .splitUp: return .up
+                    case .splitDown: return .down
+                    default: return .right
+                    }
+                }()
+                booController.state.splitCurrentPane(direction: direction)
+                if let view = booController.state.focusedSurface {
+                    return .result(value: TerminalEntity(view))
+                }
+            } else if let controller = parent.window?.windowController as? BaseTerminalController {
+                // Fall back to legacy TerminalController
+                if let view = controller.newSplit(
+                    at: parent,
+                    direction: location.splitDirection!,
+                    baseConfig: config
+                ) {
+                    return .result(value: TerminalEntity(view))
+                }
+            } else {
+                throw GhosttyIntentError.surfaceNotFound
             }
         }
 

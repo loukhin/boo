@@ -14,7 +14,13 @@ struct BooRootView: View {
     @ObservedObject var state: BooState
 
     var body: some View {
-        BonsplitView(
+        VStack(spacing: 0) {
+            // Debug build warning at the top
+            if Ghostty.info.mode == GHOSTTY_BUILD_MODE_DEBUG || Ghostty.info.mode == GHOSTTY_BUILD_MODE_RELEASE_SAFE {
+                BooDebugBuildWarningView()
+            }
+
+            BonsplitView(
             controller: state.controller,
             // During a divider drag the SwiftUI gesture steals first-responder
             // from whichever ghostty surface currently had it (the surface's
@@ -53,10 +59,12 @@ struct BooRootView: View {
         // focus from that source-of-truth callback. Bonsplit's own delegate
         // chain (`didSplitPane`, `didClosePane`, `didSelectTab`) handles the
         // explicit restore paths after structural changes.
+        }
         // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
         // for config access (split dimming, resize overlay, etc.).
         .environmentObject(state.ghostty)
         .environment(\.terminalBackgroundColor, state.terminalBackgroundColor)
+        .environment(\.isWindowKey, state.isWindowKey)
         .frame(minWidth: 600, minHeight: 400)
     }
 }
@@ -102,5 +110,41 @@ private struct BooTabPlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+/// Warning banner shown when running a debug build.
+private struct BooDebugBuildWarningView: View {
+    @State private var isPopover = false
+
+    var body: some View {
+        HStack {
+            Spacer()
+
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.yellow)
+
+            Text("You're running a debug build of Boo! Performance will be degraded.")
+                .padding(.all, 8)
+                .popover(isPresented: $isPopover, arrowEdge: .bottom) {
+                    Text("""
+                    Debug builds of Boo are very slow and you may experience
+                    performance problems. Debug builds are only recommended during
+                    development.
+                    """)
+                    .padding(.all)
+                }
+
+            Spacer()
+        }
+        .background(Color(.windowBackgroundColor))
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Debug build warning")
+        .accessibilityValue("Debug builds of Boo are very slow and you may experience performance problems. Debug builds are only recommended during development.")
+        .accessibilityAddTraits(.isStaticText)
+        .onTapGesture {
+            isPopover = true
+        }
     }
 }

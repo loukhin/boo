@@ -184,12 +184,15 @@ struct TabBarView: View {
         }
     }
 
-    // MARK: - Item Provider
+    // MARK: - Item Provider for Drag
 
     private func createItemProvider(for tab: TabItem) -> NSItemProvider {
         // Set drag source for visual feedback
         splitViewController.draggingTab = tab
         splitViewController.dragSourcePaneId = pane.id
+
+        // Start polling to detect drag end for "drag outside" feature
+        startDragEndDetection(for: tab, from: pane.id)
 
         let transfer = TabTransferData(tab: tab, sourcePaneId: pane.id.id)
         guard let data = try? JSONEncoder().encode(transfer) else {
@@ -203,6 +206,43 @@ struct TabBarView: View {
             return nil
         }
         return provider
+    }
+
+    private func startDragEndDetection(for tab: TabItem, from sourcePaneId: PaneID) {
+        // Poll to detect when drag ends (mouse released)
+        var timer: Timer?
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak splitViewController] _ in
+            let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
+            
+            if !mouseDown {
+                timer?.invalidate()
+                timer = nil
+                
+                let screenPoint = NSEvent.mouseLocation
+                
+                // Delay to let SwiftUI's drop handling complete first
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    guard let controller = splitViewController else { return }
+                    
+                    // If draggingTab is still set, no valid drop occurred
+                    if controller.draggingTab != nil {
+                        // Check if dropped outside all app windows
+                        let inWindow = NSApp.windows.contains { window in
+                            window.isVisible && window.frame.contains(screenPoint)
+                        }
+                        
+                        if !inWindow {
+                            // Trigger "dropped outside" callback
+                            controller.onTabDragEndedOutside?(tab, sourcePaneId, screenPoint)
+                        }
+                        
+                        // Clear drag state
+                        controller.draggingTab = nil
+                        controller.dragSourcePaneId = nil
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Drop Zone After Last Tab

@@ -26,18 +26,113 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     /// Open a new Boo window. Signature matches `TerminalController.newWindow`
     /// loosely so swap-in at the call site is a one-liner.
     @discardableResult
-    static func newWindow(_ ghostty: Ghostty.App) -> BooController {
-        let c = BooController(ghostty: ghostty)
+    static func newWindow(
+        _ ghostty: Ghostty.App,
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+    ) -> BooController {
+        let c = BooController(ghostty: ghostty, baseConfig: baseConfig)
         c.showWindow(nil)
         return c
     }
 
+    /// Open a new Boo window adopting an existing surface (e.g., from drag-out).
+    @discardableResult
+    static func newWindow(
+        _ ghostty: Ghostty.App,
+        withSurface surface: Ghostty.SurfaceView,
+        position: NSPoint? = nil
+    ) -> BooController {
+        let c = BooController(ghostty: ghostty, existingSurface: surface)
+        c.showWindow(nil)
+        if let position, let window = c.window {
+            // Position window so the drop point is at the center of the window
+            let windowSize = window.frame.size
+            let origin = NSPoint(
+                x: position.x - windowSize.width / 2,
+                y: position.y - windowSize.height / 2
+            )
+            window.setFrameOrigin(origin)
+            
+            // Constrain to screen bounds
+            if let screen = NSScreen.screens.first(where: { $0.frame.contains(position) }) ?? NSScreen.main {
+                var frame = window.frame
+                let visibleFrame = screen.visibleFrame
+                
+                // Ensure window fits within screen
+                if frame.maxX > visibleFrame.maxX {
+                    frame.origin.x = visibleFrame.maxX - frame.width
+                }
+                if frame.minX < visibleFrame.minX {
+                    frame.origin.x = visibleFrame.minX
+                }
+                if frame.maxY > visibleFrame.maxY {
+                    frame.origin.y = visibleFrame.maxY - frame.height
+                }
+                if frame.minY < visibleFrame.minY {
+                    frame.origin.y = visibleFrame.minY
+                }
+                
+                window.setFrame(frame, display: true)
+            }
+            
+            // Make the new window key so the old window properly resigns
+            window.makeKeyAndOrderFront(nil)
+        }
+        return c
+    }
+
+    /// Create a new tab in an existing Boo window, or a new window if none exists.
+    /// The `from` parameter identifies which window to add the tab to.
+    @discardableResult
+    static func newTab(
+        _ ghostty: Ghostty.App,
+        from window: NSWindow? = nil,
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+    ) -> BooController? {
+        // Find a BooController to add the tab to
+        let target: BooController? = {
+            if let window,
+               let controller = window.windowController as? BooController {
+                return controller
+            }
+            // Prefer key window, then any existing controller
+            if let key = NSApp.keyWindow?.windowController as? BooController {
+                return key
+            }
+            return all.first
+        }()
+
+        if let target {
+            target.state.newTab(baseConfig: baseConfig)
+            return target
+        } else {
+            // No existing window, create a new one
+            return newWindow(ghostty, withBaseConfig: baseConfig)
+        }
+    }
+
     // MARK: - Lifecycle
 
-    init(ghostty: Ghostty.App) {
+    init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
         self.ghostty = ghostty
-        self.state = BooState(ghostty: ghostty)
+        self.state = BooState(ghostty: ghostty, baseConfig: baseConfig)
 
+        let window = Self.makeWindow()
+        super.init(window: window)
+        configureWindow()
+    }
+
+    /// Init with an existing surface (for drag-out-to-new-window).
+    init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
+        self.ghostty = ghostty
+        self.state = BooState(ghostty: ghostty, existingSurface: existingSurface)
+
+        let window = Self.makeWindow()
+        super.init(window: window)
+        configureWindow()
+    }
+
+    private static func makeWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -49,11 +144,14 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.collectionBehavior = [.fullScreenPrimary]
+        return window
+    }
+
+    private func configureWindow() {
+        guard let window else { return }
 
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
-
-        super.init(window: window)
 
         // Apply initial window theme
         applyWindowTheme()
@@ -64,7 +162,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
         window.delegate = self
         BooController.all.append(self)
-        
+
         // Listen for config changes
         NotificationCenter.default.addObserver(
             self,
@@ -72,7 +170,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             name: .ghosttyConfigDidChange,
             object: nil
         )
-        
+
         // Listen for fullscreen toggle from keybindings
         NotificationCenter.default.addObserver(
             self,
@@ -80,7 +178,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             name: Ghostty.Notification.ghosttyToggleFullscreen,
             object: nil
         )
-        
+
         // Listen for close window from keybindings
         NotificationCenter.default.addObserver(
             self,
@@ -88,7 +186,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             name: .ghosttyCloseWindow,
             object: nil
         )
-        
+
         // Listen for reset window size from keybindings
         NotificationCenter.default.addObserver(
             self,
@@ -289,12 +387,14 @@ extension BooController: NSWindowDelegate {
     /// When the window becomes key, refocus the current surface so the
     /// cursor becomes filled again.
     func windowDidBecomeKey(_ notification: Notification) {
+        state.setWindowKey(true)
         state.refocusCurrentSurface()
     }
     
     /// When the window loses key status, unfocus the surface so the cursor
     /// becomes hollow.
     func windowDidResignKey(_ notification: Notification) {
+        state.setWindowKey(false)
         state.unfocusAllSurfaces()
     }
 }
