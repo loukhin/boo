@@ -46,9 +46,9 @@
 			</array>
 		</dict>
 	</array>
-	<key>GhosttyBuild</key>
+	<key>BooBuild</key>
 	<string></string>
-	<key>GhosttyCommit</key>
+	<key>BooCommit</key>
 	<string></string>
 	<key>LSEnvironment</key>
 	<dict>
@@ -62,7 +62,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>OSAScriptingDefinition</key>
-	<string>Ghostty.sdef</string>
+	<string>Boo.sdef</string>
 	<key>NSServices</key>
 	<array>
 		<dict>
@@ -112,9 +112,9 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
-			<string>com.mitchellh.ghosttySurfaceId</string>
+			<string>town.lop.booSurfaceId</string>
 			<key>UTTypeDescription</key>
-			<string>Ghostty Surface Identifier</string>
+			<string>Boo Surface Identifier</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
