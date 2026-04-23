@@ -30,3 +30,6 @@ glad.zip
 
 vgcore.*
 
+zig-pkg
+dist/out
+.env.release
