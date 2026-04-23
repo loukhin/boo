@@ -71,6 +71,21 @@ final class BooState: ObservableObject {
     /// Flag to skip auto-focus during tab drag-out operations.
     private var isDraggingTabOut: Bool = false
 
+    /// Tabs whose close was just confirmed by the user. When `shouldCloseTab`
+    /// sees an id here, it pops it out and allows the close through without
+    /// re-asking. Used to bounce through Bonsplit's close flow a second time
+    /// after the user OKs the confirmation alert.
+    private var confirmedCloseTabIds: Set<TabID> = []
+
+    /// Panes whose close was just confirmed by the user. Mirrors
+    /// `confirmedCloseTabIds` for `shouldClosePane`.
+    private var confirmedClosePaneIds: Set<PaneID> = []
+
+    /// Whether a close confirmation alert is currently on screen. Blocks
+    /// issuing a second alert for a concurrent close attempt (e.g. holding
+    /// ⌘W or clicking multiple X buttons).
+    private var isShowingCloseConfirmation = false
+
     private var tabCounter = 0
 
     init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
@@ -435,6 +450,10 @@ final class BooState: ObservableObject {
     @objc private func onGhosttyCloseSurface(_ note: Notification) {
         guard let surface = note.object as? Ghostty.SurfaceView,
               let tabId = tabId(for: surface) else { return }
+        // Route through `controller.closeTab` so our `shouldCloseTab` gate
+        // handles confirmation uniformly. The `process_alive` hint in the
+        // userInfo is equivalent to the surface's `needsConfirmQuit`, which
+        // is what the gate already checks.
         _ = controller.closeTab(tabId)
     }
 
@@ -580,6 +599,96 @@ final class BooState: ObservableObject {
 
 @MainActor
 extension BooState: BonsplitDelegate {
+    /// Gate tab close on a confirmation alert when the surface still has a
+    /// running child process. Returning `false` vetoes the close; on OK we
+    /// reinvoke `closeTab` with the id pre-authorized.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        shouldCloseTab tab: Tab,
+        inPane pane: PaneID
+    ) -> Bool {
+        // Second pass after the user confirmed - let it through.
+        if confirmedCloseTabIds.remove(tab.id) != nil {
+            return true
+        }
+
+        // If the tab's surface doesn't need confirmation, close immediately.
+        guard let surface = surfaces[tab.id], surface.needsConfirmQuit else {
+            return true
+        }
+
+        // Show confirmation; on OK, pre-authorize and retry the close.
+        presentCloseConfirmation(
+            messageText: "Close Terminal?",
+            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
+        ) { [weak self] in
+            guard let self else { return }
+            self.confirmedCloseTabIds.insert(tab.id)
+            _ = self.controller.closeTab(tab.id, inPane: pane)
+        }
+        return false
+    }
+
+    /// Gate pane close on a confirmation alert if any tab in the pane has a
+    /// running process. Mirrors `shouldCloseTab` but aggregates across every
+    /// surface in the pane.
+    func splitTabBar(
+        _ controller: BonsplitController,
+        shouldClosePane pane: PaneID
+    ) -> Bool {
+        if confirmedClosePaneIds.remove(pane) != nil {
+            return true
+        }
+
+        let paneSurfaces = controller.tabs(inPane: pane).compactMap { surfaces[$0.id] }
+        guard paneSurfaces.contains(where: { $0.needsConfirmQuit }) else {
+            return true
+        }
+
+        presentCloseConfirmation(
+            messageText: "Close Split?",
+            informativeText: "A terminal in this split still has a running process. If you close the split the process will be killed."
+        ) { [weak self] in
+            guard let self else { return }
+            self.confirmedClosePaneIds.insert(pane)
+            _ = self.controller.closePane(pane)
+        }
+        return false
+    }
+
+    /// Show the close-confirmation alert as a sheet on our window.
+    /// No-ops when another confirmation is already on screen so a burst of
+    /// close requests doesn't stack alerts.
+    func presentCloseConfirmation(
+        messageText: String,
+        informativeText: String,
+        onConfirm: @escaping () -> Void
+    ) {
+        guard !isShowingCloseConfirmation else { return }
+        guard let window else {
+            // No window to attach to - just proceed.
+            onConfirm()
+            return
+        }
+
+        isShowingCloseConfirmation = true
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window) { [weak self] response in
+            // Order the alert window out first to avoid focus-loss glitches
+            // under Stage Manager (same workaround as ghostty's upstream).
+            alert.window.orderOut(nil)
+            self?.isShowingCloseConfirmation = false
+            if response == .alertFirstButtonReturn {
+                onConfirm()
+            }
+        }
+    }
+
     /// Free the surface when its tab is closed. Without this the surface
     /// (and its child process) would leak for the lifetime of the window.
     ///

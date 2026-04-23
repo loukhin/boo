@@ -1,9 +1,14 @@
+import AppKit
 import SwiftUI
 
 /// Individual tab view with icon, title, close button, and dirty indicator
 struct TabItemView: View {
     let tab: TabItem
     let isSelected: Bool
+    /// Whether the owning pane is currently active (focused or drag source).
+    /// When false, the accent indicator desaturates to signal the unfocused
+    /// state without affecting the selected-tab background fill.
+    var isPaneActive: Bool = true
     let onSelect: () -> Void
     let onClose: () -> Void
 
@@ -49,6 +54,10 @@ struct TabItemView: View {
         .padding(.bottom, isSelected ? 1 : 0)
         .background(tabBackground)
         .contentShape(Rectangle())
+        // Middle-click closes the tab. Overlaid as an AppKit view so we can
+        // pick up `otherMouseUp` without stealing left/right clicks from the
+        // SwiftUI tap/drag gestures below.
+        .overlay(MiddleClickCloseView(onMiddleClick: onClose))
         // Selected tab covers the tab bar's bottom border
         .overlay(alignment: .bottom) {
             if isSelected {
@@ -87,11 +96,14 @@ struct TabItemView: View {
                 Color.clear
             }
 
-            // Top accent indicator for selected tab
+            // Top accent indicator for selected tab. Desaturated when the
+            // owning pane is inactive so the bar as a whole still reads as
+            // unfocused, without greying the tab's terminal-colored fill.
             if isSelected {
                 Rectangle()
                     .fill(Color.accentColor)
                     .frame(height: TabBarMetrics.activeIndicatorHeight)
+                    .saturation(isPaneActive ? 1 : 0)
             }
 
             // Right border separator
@@ -139,5 +151,58 @@ struct TabItemView: View {
         .frame(width: TabBarMetrics.closeButtonSize, height: TabBarMetrics.closeButtonSize)
         .animation(.easeInOut(duration: TabBarMetrics.hoverDuration), value: isHovered)
         .animation(.easeInOut(duration: TabBarMetrics.hoverDuration), value: isCloseHovered)
+    }
+}
+
+// MARK: - Middle-Click Close
+
+/// Transparent AppKit overlay that invokes `onMiddleClick` on middle-mouse-up.
+///
+/// The view only claims hit tests when the middle button (button 2) is the one
+/// currently pressed, so left-clicks keep flowing to SwiftUI's `onTapGesture`
+/// and right-clicks keep reaching any context menu. Close is dispatched on
+/// `otherMouseUp` to match typical browser semantics (press + release on the
+/// same tab), and only when the release happens inside the view's bounds.
+private struct MiddleClickCloseView: NSViewRepresentable {
+    let onMiddleClick: () -> Void
+
+    func makeNSView(context: Context) -> MiddleClickNSView {
+        let view = MiddleClickNSView()
+        view.onMiddleClick = onMiddleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: MiddleClickNSView, context: Context) {
+        nsView.onMiddleClick = onMiddleClick
+    }
+
+    final class MiddleClickNSView: NSView {
+        var onMiddleClick: (() -> Void)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            // Only intercept events when the middle button is the one being
+            // pressed. Bit 2 (value 4) is the middle/"other" button in
+            // NSEvent.pressedMouseButtons' bitmask.
+            let middlePressed = (NSEvent.pressedMouseButtons & (1 << 2)) != 0
+            guard middlePressed, bounds.contains(point) else { return nil }
+            return self
+        }
+
+        override func otherMouseDown(with event: NSEvent) {
+            // Swallow so the event doesn't bubble; we'll act on mouseUp.
+        }
+
+        override func otherMouseUp(with event: NSEvent) {
+            guard event.buttonNumber == 2 else {
+                super.otherMouseUp(with: event)
+                return
+            }
+            let location = convert(event.locationInWindow, from: nil)
+            if bounds.contains(location) {
+                onMiddleClick?()
+            }
+        }
     }
 }

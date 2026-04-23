@@ -292,7 +292,10 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         guard let surface = notification.object as? Ghostty.SurfaceView,
               state.surfaces.values.contains(where: { $0 === surface }) else { return }
 
-        window?.close()
+        // Use performClose so `windowShouldClose` runs and we can prompt
+        // for confirmation if any surface in the window still has a
+        // running child process.
+        window?.performClose(nil)
     }
 
     @objc private func onResetWindowSize(_ notification: Notification) {
@@ -349,7 +352,7 @@ extension BooController {
     }
 
     @objc func closeWindow(_ sender: Any?) {
-        window?.close()
+        window?.performClose(nil)
     }
 
     @objc func splitRight(_ sender: Any?) {
@@ -455,6 +458,29 @@ extension BooController {
 // MARK: - NSWindowDelegate
 
 extension BooController: NSWindowDelegate {
+    /// Called when the user clicks the red window X or anything else that
+    /// goes through `performClose`. Prompts for confirmation when any
+    /// surface in the window still has a running child process.
+    ///
+    /// Direct `window.close()` bypasses this delegate (AppKit behavior),
+    /// which is why we route the keybind-driven close through `performClose`.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // No surfaces means nothing to confirm - let the close proceed.
+        if state.surfaces.isEmpty { return true }
+
+        // If nothing in the window needs confirmation, close immediately.
+        let needsConfirm = state.surfaces.values.contains { $0.needsConfirmQuit }
+        if !needsConfirm { return true }
+
+        state.presentCloseConfirmation(
+            messageText: "Close Window?",
+            informativeText: "All terminals in this window will be closed. Any running processes will be killed."
+        ) { [weak sender] in
+            sender?.close()
+        }
+        return false
+    }
+
     func windowWillClose(_ notification: Notification) {
         BooController.all.removeAll { $0 === self }
 

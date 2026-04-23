@@ -149,7 +149,6 @@ struct TabBarView: View {
         .frame(height: TabBarMetrics.barHeight)
         .contentShape(Rectangle())
         .background(tabBarBackground)
-        .saturation(shouldShowFullSaturation ? 1.0 : 0)
     }
 
     // MARK: - Tab Item
@@ -159,6 +158,7 @@ struct TabBarView: View {
         TabItemView(
             tab: tab,
             isSelected: pane.selectedTabId == tab.id,
+            isPaneActive: shouldShowFullSaturation,
             onSelect: {
                 withAnimation(.easeInOut(duration: TabBarMetrics.selectionDuration)) {
                     pane.selectTab(tab.id)

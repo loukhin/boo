@@ -21,39 +21,39 @@ struct BooRootView: View {
             }
 
             BonsplitView(
-            controller: state.controller,
-            // During a divider drag the SwiftUI gesture steals first-responder
-            // from whichever ghostty surface currently had it (the surface's
-            // tracking areas see the drag as a mouse event in a different
-            // view). We can't keep focus *through* the drag without deeper
-            // surface-level surgery, so we just push it back when the drag
-            // ends — same net result from the user's perspective.
-            onDividerDragEnd: { [weak state] in state?.focusCurrentTabSurface() }
-        ) { tab, paneId in
-            // Computed here so the body re-evaluates when Bonsplit's
-            // PaneState (@Published selectedTabId) changes — that's our
-            // hook for "user clicked a tab in the tab bar", since
-            // Bonsplit's didSelectTab delegate does NOT fire for tab-bar
-            // clicks (it only fires for programmatic selection).
-            let isSelected = state.controller.selectedTab(inPane: paneId)?.id == tab.id
+                controller: state.controller,
+                // During a divider drag the SwiftUI gesture steals first-responder
+                // from whichever ghostty surface currently had it (the surface's
+                // tracking areas see the drag as a mouse event in a different
+                // view). We can't keep focus *through* the drag without deeper
+                // surface-level surgery, so we just push it back when the drag
+                // ends — same net result from the user's perspective.
+                onDividerDragEnd: { [weak state] in state?.focusCurrentTabSurface() }
+            ) { tab, paneId in
+                // Computed here so the body re-evaluates when Bonsplit's
+                // PaneState (@Published selectedTabId) changes — that's our
+                // hook for "user clicked a tab in the tab bar", since
+                // Bonsplit's didSelectTab delegate does NOT fire for tab-bar
+                // clicks (it only fires for programmatic selection).
+                let isSelected = state.controller.selectedTab(inPane: paneId)?.id == tab.id
 
-            if let surface = state.surfaces[tab.id] {
-                BooSurfaceContainer(
-                    surface: surface,
-                    isSelected: isSelected
-                )
-                // NOTE: we intentionally do NOT use `.id(surface)` here.
-                // With `keepAllAlive` mode, tabs live in ForEach inside
-                // different pane ZStacks. When a tab moves between panes,
-                // SwiftUI's view identity reconciliation with `.id()` gets
-                // confused and can leave views unmounted. Without `.id()`,
-                // SwiftUI recreates the wrapper on reparent, but the
-                // underlying SurfaceView NSView reattaches correctly since
-                // it's passed by reference.
-            } else {
-                BooTabPlaceholder(title: tab.title)
+                if let surface = state.surfaces[tab.id] {
+                    BooSurfaceContainer(
+                        surface: surface,
+                        isSelected: isSelected
+                    )
+                    // NOTE: we intentionally do NOT use `.id(surface)` here.
+                    // With `keepAllAlive` mode, tabs live in ForEach inside
+                    // different pane ZStacks. When a tab moves between panes,
+                    // SwiftUI's view identity reconciliation with `.id()` gets
+                    // confused and can leave views unmounted. Without `.id()`,
+                    // SwiftUI recreates the wrapper on reparent, but the
+                    // underlying SurfaceView NSView reattaches correctly since
+                    // it's passed by reference.
+                } else {
+                    BooTabPlaceholder(title: tab.title)
+                }
             }
-        }
         // No outer click-to-focus gesture here. Surface clicks are handled
         // by AppKit at the real terminal NSView level, and Boo syncs Bonsplit
         // focus from that source-of-truth callback. Bonsplit's own delegate
@@ -125,7 +125,7 @@ private struct BooDebugBuildWarningView: View {
                 .foregroundColor(.yellow)
 
             Text("You're running a debug build of Boo! Performance will be degraded.")
-                .padding(.all, 8)
+                .padding(.all, 4)
                 .popover(isPresented: $isPopover, arrowEdge: .bottom) {
                     Text("""
                     Debug builds of Boo are very slow and you may experience
