@@ -106,8 +106,10 @@
 	</array>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
-	<key>SUPublicEDKey</key>
-	<string>wsNcGf5hirwtdXMVnYoxRIX/SqZQLMOsYlD3q3imeok=</string>
+	<!-- SUPublicEDKey intentionally omitted: Boo has no appcast yet and no
+	     signing key. Release scripts (dist/macos/release-local.sh,
+	     .github/workflows/release-*.yml) inject a real key via PlistBuddy
+	     `Add` when BOO_SPARKLE_PUB / SPARKLE_KEY_PUB is provided. -->
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

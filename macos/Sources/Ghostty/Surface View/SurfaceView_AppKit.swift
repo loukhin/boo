@@ -2101,6 +2101,21 @@ extension Ghostty.SurfaceView {
         .URL
     ]
 
+    /// Enables/disables this surface as an AppKit drag destination. In Boo's
+    /// `keepAllAlive` tab mode, every tab's SurfaceView stays in the view
+    /// hierarchy. AppKit's drag routing walks views registered for dragged
+    /// types independently of SwiftUI `.allowsHitTesting`, so without this
+    /// flag file drops land on whichever registered view is topmost in
+    /// z-order (the most-recently-inserted tab) instead of the selected tab.
+    /// PaneContainerView toggles this via an environment value.
+    func setDropDestinationEnabled(_ enabled: Bool) {
+        if enabled {
+            registerForDraggedTypes(Array(Self.dropTypes))
+        } else {
+            unregisterDraggedTypes()
+        }
+    }
+
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         guard let types = sender.draggingPasteboard.types else { return [] }
 

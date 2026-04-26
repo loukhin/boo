@@ -190,6 +190,27 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         // Apply initial window theme
         applyWindowTheme()
 
+        // In non-release builds, install a right-aligned titlebar pill so
+        // the "this is a debug build" signal is present without stealing a
+        // row of terminal content. Same gate the old inline banner used.
+        //
+        // NOTE on ordering: `translatesAutoresizingMaskIntoConstraints = false`
+        // must be set AFTER `addTitlebarAccessoryViewController`, matching the
+        // pattern in `TerminalWindow.awakeFromNib`. Setting it earlier means
+        // AppKit never synthesizes placement constraints from the hosting view's
+        // frame and the pill ends up with a 0x0 layout.
+        if window.styleMask.contains(.titled),
+           Ghostty.info.mode == GHOSTTY_BUILD_MODE_DEBUG ||
+           Ghostty.info.mode == GHOSTTY_BUILD_MODE_RELEASE_SAFE {
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.layoutAttribute = .right
+            // `NonDraggableHostingView` so clicking the pill doesn't start
+            // a window drag (same reason ghostty uses it for the update pill).
+            accessory.view = NonDraggableHostingView(rootView: BooDebugAccessoryView())
+            window.addTitlebarAccessoryViewController(accessory)
+            accessory.view.translatesAutoresizingMaskIntoConstraints = false
+        }
+
         // Let BooState know which window it lives in so it can filter
         // app-level ghostty notifications to the key window.
         state.window = window

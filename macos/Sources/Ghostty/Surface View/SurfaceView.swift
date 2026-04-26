@@ -54,6 +54,7 @@ extension Ghostty {
 
         @EnvironmentObject private var ghostty: Ghostty.App
         @Environment(\.ghosttyLastFocusedSurface) private var lastFocusedSurface
+        @Environment(\.ghosttySurfaceAcceptsDrops) private var acceptsDrops
 
         private var isFocusedSurface: Bool {
             surfaceFocus || lastFocusedSurface?.value === surfaceView
@@ -210,6 +211,14 @@ extension Ghostty {
                 SurfaceGrabHandle(surfaceView: surfaceView)
                 #endif
             }
+            #if canImport(AppKit)
+            .onAppear {
+                surfaceView.setDropDestinationEnabled(acceptsDrops)
+            }
+            .onChange(of: acceptsDrops) { _, newValue in
+                surfaceView.setDropDestinationEnabled(newValue)
+            }
+            #endif
         }
     }
 
@@ -1205,6 +1214,19 @@ extension EnvironmentValues {
         get { self[GhosttyLastFocusedSurfaceKey.self] }
         set { self[GhosttyLastFocusedSurfaceKey.self] = newValue }
     }
+
+    /// Whether this SurfaceView should accept drag-and-drop drops from
+    /// outside (files, URLs, strings). Used by Boo's keepAllAlive tab mode
+    /// to disable drops on non-selected tabs so AppKit routes the drop to
+    /// the visible tab.
+    var ghosttySurfaceAcceptsDrops: Bool {
+        get { self[GhosttySurfaceAcceptsDropsKey.self] }
+        set { self[GhosttySurfaceAcceptsDropsKey.self] = newValue }
+    }
+}
+
+private struct GhosttySurfaceAcceptsDropsKey: EnvironmentKey {
+    static let defaultValue: Bool = true
 }
 
 extension View {

@@ -14,12 +14,10 @@ struct BooRootView: View {
     @ObservedObject var state: BooState
 
     var body: some View {
+        // Debug build warning now lives in the titlebar as a pill
+        // (see `BooDebugPill` / `BooController.configureWindow`). The old
+        // inline banner used to sit above the Bonsplit view here.
         VStack(spacing: 0) {
-            // Debug build warning at the top
-            if Ghostty.info.mode == GHOSTTY_BUILD_MODE_DEBUG || Ghostty.info.mode == GHOSTTY_BUILD_MODE_RELEASE_SAFE {
-                BooDebugBuildWarningView()
-            }
-
             BonsplitView(
                 controller: state.controller,
                 // During a divider drag the SwiftUI gesture steals first-responder
@@ -113,38 +111,3 @@ private struct BooTabPlaceholder: View {
     }
 }
 
-/// Warning banner shown when running a debug build.
-private struct BooDebugBuildWarningView: View {
-    @State private var isPopover = false
-
-    var body: some View {
-        HStack {
-            Spacer()
-
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.yellow)
-
-            Text("You're running a debug build of Boo! Performance will be degraded.")
-                .padding(.all, 4)
-                .popover(isPresented: $isPopover, arrowEdge: .bottom) {
-                    Text("""
-                    Debug builds of Boo are very slow and you may experience
-                    performance problems. Debug builds are only recommended during
-                    development.
-                    """)
-                    .padding(.all)
-                }
-
-            Spacer()
-        }
-        .background(Color(.windowBackgroundColor))
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Debug build warning")
-        .accessibilityValue("Debug builds of Boo are very slow and you may experience performance problems. Debug builds are only recommended during development.")
-        .accessibilityAddTraits(.isStaticText)
-        .onTapGesture {
-            isPopover = true
-        }
-    }
-}

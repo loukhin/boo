@@ -107,6 +107,12 @@ struct PaneContainerView<Content: View>: View {
                         .opacity(isSelected ? 1 : 0)
                         .transaction { $0.animation = nil }
                         .allowsHitTesting(isSelected)
+                        // AppKit drag-destination routing is independent of
+                        // SwiftUI hit-testing; without disabling drops on
+                        // inactive tabs, file drops would always land on the
+                        // topmost SurfaceView in the ZStack instead of the
+                        // selected one.
+                        .environment(\.ghosttySurfaceAcceptsDrops, isSelected)
                 }
             }
         }
