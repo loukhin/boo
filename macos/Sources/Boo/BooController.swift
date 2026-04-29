@@ -274,23 +274,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
             window.appearance = appearance
         }
-        window.backgroundColor = Self.chromeColor(for: ghostty.config.backgroundColor)
-    }
-
-    /// Slightly lighten the terminal background so the window chrome
-    /// (titlebar + empty tab-bar space) reads as a distinct surface above the
-    /// terminal panes, which still draw their own un-tinted background.
-    private static func chromeColor(for terminalBackground: Color) -> NSColor {
-        let base = NSColor(terminalBackground).usingColorSpace(.sRGB) ?? NSColor(terminalBackground)
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        base.getRed(&r, green: &g, blue: &b, alpha: &a)
-        let mix: CGFloat = 0.35
-        return NSColor(
-            srgbRed: r + (1.0 - r) * mix,
-            green: g + (1.0 - g) * mix,
-            blue: b + (1.0 - b) * mix,
-            alpha: a
-        )
+        window.backgroundColor = NSColor(ghostty.config.backgroundColor).usingColorSpace(.sRGB)
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
