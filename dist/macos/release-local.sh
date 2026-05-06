@@ -99,11 +99,6 @@ if [[ -d "${SPARKLE}" ]]; then
   sign "${SPARKLE}"
 fi
 
-DOCKTILE="${APP_PATH}/Contents/PlugIns/DockTilePlugin.plugin"
-if [[ -d "${DOCKTILE}" ]]; then
-  sign "${DOCKTILE}"
-fi
-
 /usr/bin/codesign --verbose -f -s "${MACOS_CERTIFICATE_NAME}" -o runtime \
   --entitlements "${REPO_ROOT}/macos/Boo.entitlements" \
   "${APP_PATH}"
