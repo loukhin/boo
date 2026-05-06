@@ -6,8 +6,7 @@ struct SettingsView: View {
 
     var body: some View {
         HStack {
-            Image("AppIconImage")
-                .resizable()
+            AppIconView()
                 .scaledToFit()
                 .frame(width: 128, height: 128)
 

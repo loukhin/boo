@@ -151,8 +151,6 @@ class AppDelegate: NSObject,
     /// Signals
     private var signals: [DispatchSourceSignal] = []
 
-    private let appIconUpdater = AppIconUpdater()
-
     @MainActor private lazy var menuShortcutManager = Ghostty.MenuShortcutManager()
 
     override init() {
@@ -841,18 +839,14 @@ class AppDelegate: NSObject,
             GlobalEventTap.shared.disable()
         }
 
-        updateAppIcon(from: config)
+        // Boo: runtime app-icon switching disabled. The bundle icon
+        // (Boo.icon) is used as-is. Config keys (`macos-icon`, etc.) are
+        // still parsed but have no effect.
     }
 
     /// Sync the appearance of our app with the theme specified in the config.
     private func syncAppearance(config: Ghostty.Config) {
         NSApplication.shared.appearance = .init(ghosttyConfig: config)
-    }
-
-    private func updateAppIcon(from config: Ghostty.Config) {
-        Task.detached {
-            await self.appIconUpdater.update(icon: AppIcon(config: config))
-        }
     }
 
     // MARK: - Restorable State
