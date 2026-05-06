@@ -131,7 +131,7 @@ if [[ "${SKIP_NOTARIZE:-0}" != "1" ]]; then
 
   echo ">> [6/7] staple"
   xcrun stapler staple "${APP_PATH}"
-  /usr/bin/spctl -a -vvv --type execute "${APP_PATH}"
+  spctl -a -vvv --type execute "${APP_PATH}"
 else
   echo ">> [5/7] SKIP notarize"
   echo ">> [6/7] SKIP staple"
