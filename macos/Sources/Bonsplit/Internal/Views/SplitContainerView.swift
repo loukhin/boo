@@ -47,12 +47,9 @@ struct SplitContainerView<Content: View>: View {
 
     // Divider sizing. The visible line is 1pt (matching NSSplitView `.thin`);
     // the invisible grab area around it widens the hitbox so the divider is
-    // easy to grab without growing the visual thickness. ghostty uses 6pt of
-    // padding; we use more because Boo's surfaces aggressively capture mouse
-    // events (tracking areas for text selection / URL hover), which eats into
-    // the effective hit area near the divider edge.
+    // easy to grab without growing the visual thickness.
     private let visibleThickness: CGFloat = TabBarMetrics.dividerThickness
-    private let invisiblePadding: CGFloat = 10
+    private let invisiblePadding: CGFloat = 6
     private var hitboxThickness: CGFloat { visibleThickness + invisiblePadding }
 
     var body: some View {
