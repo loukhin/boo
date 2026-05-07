@@ -19,7 +19,7 @@ class AboutController: NSWindowController, NSWindowDelegate {
 
     func show() {
         window?.makeKeyAndOrderFront(nil)
-        viewModel.startCyclingIcons()
+//        viewModel.startCyclingIcons()
     }
 
     func hide() {
@@ -42,6 +42,6 @@ class AboutController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
-        viewModel.stopCyclingIcons()
+//        viewModel.stopCyclingIcons()
     }
 }
