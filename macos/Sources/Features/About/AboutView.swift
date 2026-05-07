@@ -45,34 +45,6 @@ struct AboutView: View {
 
     private var copyright: String? { Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String }
 
-    #if os(macOS)
-    // This creates a background style similar to the Apple "About My Mac" Window
-    private struct VisualEffectBackground: NSViewRepresentable {
-        let material: NSVisualEffectView.Material
-        let blendingMode: NSVisualEffectView.BlendingMode
-        let isEmphasized: Bool
-
-        init(material: NSVisualEffectView.Material,
-             blendingMode: NSVisualEffectView.BlendingMode = .behindWindow,
-             isEmphasized: Bool = false) {
-            self.material = material
-            self.blendingMode = blendingMode
-            self.isEmphasized = isEmphasized
-        }
-
-        func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-            nsView.material = material
-            nsView.blendingMode = blendingMode
-            nsView.isEmphasized = isEmphasized
-        }
-
-        func makeNSView(context: Context) -> NSVisualEffectView {
-            let visualEffect = NSVisualEffectView()
-            visualEffect.autoresizingMask = [.width, .height]
-            return visualEffect
-        }
-    }
-    #endif
 
     var body: some View {
         VStack(alignment: .center) {
@@ -83,7 +55,7 @@ struct AboutView: View {
                     Text("Boo")
                         .bold()
                         .font(.title)
-                    Text("A ghostty fork with bonsplit.")
+                    Text("A ghostty fork with bonsplit pane/tab.")
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .font(.caption)
@@ -115,7 +87,7 @@ struct AboutView: View {
 
                 HStack(spacing: 8) {
                     if let url = docsURL {
-                        Button("Docs") {
+                        Button("Ghostty Docs") {
                             openURL(url)
                         }
                     }
@@ -141,9 +113,6 @@ struct AboutView: View {
         .padding(.top, 8)
         .padding(32)
         .frame(minWidth: 256)
-        #if os(macOS)
-        .background(VisualEffectBackground(material: .underWindowBackground).ignoresSafeArea())
-        #endif
     }
 
     private struct PropertyRow: View {
