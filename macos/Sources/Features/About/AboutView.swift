@@ -55,7 +55,7 @@ struct AboutView: View {
                     Text("Boo")
                         .bold()
                         .font(.title)
-                    Text("A ghostty fork with bonsplit pane/tab.")
+                    Text("Ghostty fork with a workspace and alternative tab/split implementation")
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .font(.caption)
