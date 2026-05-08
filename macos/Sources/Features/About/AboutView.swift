@@ -3,7 +3,7 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.openURL) var openURL
 
-    private let githubURL = URL(string: "https://github.com/lop-town/boo")
+    private let githubURL = URL(string: "https://github.com/loukhin/boo")
     private let docsURL = URL(string: "https://ghostty.org/docs")
 
     /// Read the commit from the bundle.
