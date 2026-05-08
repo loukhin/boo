@@ -20,6 +20,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     let state: BooState
     private let ghostty: Ghostty.App
+    private var keyDownMonitor: Any?
 
     // MARK: - Factory
 
@@ -172,6 +173,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             defer: false
         )
         window.title = "Boo"
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
         window.collectionBehavior = [.fullScreenPrimary]
@@ -189,6 +191,16 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
         // Apply initial window theme
         applyWindowTheme()
+
+        if window.styleMask.contains(.titled) {
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.layoutAttribute = .left
+            accessory.view = NonDraggableHostingView(
+                rootView: BooTitlebarWorkspaceControls(state: state)
+            )
+            window.addTitlebarAccessoryViewController(accessory)
+            accessory.view.translatesAutoresizingMaskIntoConstraints = false
+        }
 
         // In non-release builds, install a right-aligned titlebar pill so
         // the "this is a debug build" signal is present without stealing a
@@ -257,6 +269,13 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             name: .ghosttyResetWindowSize,
             object: nil
         )
+
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  self.window?.isKeyWindow == true,
+                  self.handleBooKeyDown(event) else { return event }
+            return nil
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -264,6 +283,9 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     }
 
     deinit {
+        if let keyDownMonitor {
+            NSEvent.removeMonitor(keyDownMonitor)
+        }
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -325,15 +347,398 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             controller.window?.saveFrame(usingName: "BooWindow")
         }
     }
+
+    private func handleBooKeyDown(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        guard let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
+
+        if flags == [.command], let index = Self.workspaceShortcutIndex(for: key) {
+            state.switchToWorkspace(at: index)
+            return true
+        }
+
+        if flags == [.control], let index = Self.workspaceShortcutIndex(for: key) {
+            state.selectTab(at: index)
+            return true
+        }
+
+        if flags == [.command], key == "s" {
+            state.toggleWorkspaceSidebar()
+            return true
+        }
+
+        if flags == [.command], key == "n" {
+            state.newWorkspace(
+                baseConfig: state.inheritedConfigForFocusedSurface(
+                    context: GHOSTTY_SURFACE_CONTEXT_WINDOW
+                )
+            )
+            return true
+        }
+
+        if flags == [.command, .shift], key == "n" {
+            _ = BooController.newWindow(
+                ghostty,
+                withBaseConfig: state.inheritedConfigForFocusedSurface(
+                    context: GHOSTTY_SURFACE_CONTEXT_WINDOW
+                )
+            )
+            return true
+        }
+
+        return false
+    }
+
+    private static func workspaceShortcutIndex(for key: String) -> Int? {
+        guard key.count == 1, let value = Int(key), (1...9).contains(value) else { return nil }
+        return value - 1
+    }
+}
+
+private struct BooTitlebarWorkspaceControls: View {
+    @ObservedObject var state: BooState
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 4) {
+            Button {
+                state.toggleWorkspaceSidebar()
+            } label: {
+                titlebarIcon("sidebar.left")
+            }
+            .buttonStyle(.plain)
+            .help("Toggle Workspace Sidebar")
+
+            Button {
+                state.newWorkspace(
+                    baseConfig: state.inheritedConfigForFocusedSurface(
+                        context: GHOSTTY_SURFACE_CONTEXT_WINDOW
+                    )
+                )
+            } label: {
+                titlebarIcon("plus")
+            }
+            .buttonStyle(.plain)
+            .help("New Workspace")
+
+            BooProxyTitleView(
+                title: state.windowChromeTitle,
+                url: state.windowChromeURL
+            )
+            .frame(height: 20)
+            .padding(.leading, 4)
+        }
+        .frame(height: 28, alignment: .center)
+        .padding(.leading, 8)
+        // AppKit places titlebar accessories slightly high relative to the
+        // traffic lights. Nudge the whole cluster down so the symbols sit on
+        // the same optical centerline.
+        .offset(y: 2)
+    }
+
+    private func titlebarIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 20, height: 20, alignment: .center)
+            .contentShape(Rectangle())
+    }
+}
+
+private struct BooProxyTitleView: NSViewRepresentable {
+    let title: String
+    let url: URL?
+
+    func makeNSView(context: Context) -> BooProxyTitleNSView {
+        BooProxyTitleNSView()
+    }
+
+    func updateNSView(_ view: BooProxyTitleNSView, context: Context) {
+        view.title = title
+        view.representedURL = url
+    }
+}
+
+private final class BooProxyTitleNSView: NSView, NSDraggingSource {
+    var title: String = "Boo" {
+        didSet { updateTitle() }
+    }
+
+    var representedURL: URL? {
+        didSet { updateIcon() }
+    }
+
+    private let stackView = NSStackView()
+    private let imageView = NSImageView()
+    private let titleField = NSTextField(labelWithString: "Boo")
+    private var mouseDownEvent: NSEvent?
+    private var didStartDrag = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override var intrinsicContentSize: NSSize {
+        let textSize = titleField.intrinsicContentSize
+        let iconWidth: CGFloat = representedURL == nil ? 0 : 21
+        return NSSize(width: min(360, iconWidth + textSize.width), height: 20)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        showPathMenu(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.command, .control])
+        if !flags.isEmpty {
+            showPathMenu(with: event)
+            return
+        }
+
+        guard representedURL != nil else { return }
+        mouseDownEvent = event
+        didStartDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let mouseDownEvent, !didStartDrag else { return }
+
+        let start = mouseDownEvent.locationInWindow
+        let current = event.locationInWindow
+        let distance = hypot(current.x - start.x, current.y - start.y)
+        guard distance >= 3 else { return }
+
+        didStartDrag = true
+        startDragging(with: mouseDownEvent)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        mouseDownEvent = nil
+        didStartDrag = false
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        .copy
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    private func setupView() {
+        wantsLayer = true
+
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.setContentHuggingPriority(.required, for: .horizontal)
+        imageView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+
+        titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleField.textColor = .labelColor
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.maximumNumberOfLines = 1
+        titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 5
+        stackView.addArrangedSubview(imageView)
+        stackView.addArrangedSubview(titleField)
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stackView)
+
+        NSLayoutConstraint.activate([
+            imageView.widthAnchor.constraint(equalToConstant: 16),
+            imageView.heightAnchor.constraint(equalToConstant: 16),
+            stackView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stackView.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+
+        updateTitle()
+        updateIcon()
+    }
+
+    private func updateTitle() {
+        titleField.stringValue = title
+        invalidateIntrinsicContentSize()
+    }
+
+    private func updateIcon() {
+        guard let representedURL else {
+            imageView.image = nil
+            imageView.isHidden = true
+            invalidateIntrinsicContentSize()
+            return
+        }
+
+        let image = NSWorkspace.shared.icon(forFile: representedURL.path)
+        image.size = NSSize(width: 16, height: 16)
+        imageView.image = image
+        imageView.isHidden = false
+        invalidateIntrinsicContentSize()
+    }
+
+    private func showPathMenu(with event: NSEvent) {
+        guard let representedURL else { return }
+
+        let menu = NSMenu()
+        for url in pathMenuURLs(from: representedURL) {
+            let item = NSMenuItem(
+                title: menuTitle(for: url),
+                action: #selector(openPathMenuItem(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = url
+            item.image = menuIcon(for: url)
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        let copyItem = NSMenuItem(
+            title: "Copy Path",
+            action: #selector(copyPathMenuItem(_:)),
+            keyEquivalent: ""
+        )
+        copyItem.target = self
+        copyItem.representedObject = representedURL
+        menu.addItem(copyItem)
+
+        menu.popUp(positioning: nil, at: proxyMenuPoint, in: self)
+    }
+
+    private var proxyMenuPoint: NSPoint {
+        guard representedURL != nil else { return .zero }
+
+        let iconFrame = imageView.convert(imageView.bounds, to: self)
+        return NSPoint(
+            x: iconFrame.minX,
+            y: iconFrame.minY - 2
+        )
+    }
+
+    private func pathMenuURLs(from url: URL) -> [URL] {
+        var urls: [URL] = []
+        var current = url.standardizedFileURL
+        var seenPaths: Set<String> = []
+
+        while !seenPaths.contains(current.path) {
+            urls.append(current)
+            seenPaths.insert(current.path)
+
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            guard parent.path != current.path else { break }
+            current = parent
+        }
+
+        return urls
+    }
+
+    private func menuTitle(for url: URL) -> String {
+        let name = FileManager.default.displayName(atPath: url.path)
+        if !name.isEmpty { return name }
+        return url.path
+    }
+
+    private func menuIcon(for url: URL) -> NSImage {
+        let image = NSWorkspace.shared.icon(forFile: url.path)
+        image.size = NSSize(width: 16, height: 16)
+        return image
+    }
+
+    @objc private func openPathMenuItem(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func copyPathMenuItem(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.path, forType: .string)
+    }
+
+    private func startDragging(with event: NSEvent) {
+        guard let representedURL else { return }
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: representedURL as NSURL)
+        let image = dragImage(for: representedURL)
+        let location = convert(event.locationInWindow, from: nil)
+        draggingItem.setDraggingFrame(
+            NSRect(
+                x: location.x - image.size.width / 2,
+                y: location.y - image.size.height / 2,
+                width: image.size.width,
+                height: image.size.height
+            ),
+            contents: image
+        )
+
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    private func dragImage(for url: URL) -> NSImage {
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 16, height: 16)
+
+        let displayTitle = title.isEmpty ? menuTitle(for: url) : title
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let attributedTitle = NSAttributedString(string: displayTitle, attributes: attributes)
+        let textSize = attributedTitle.size()
+        let textWidth = min(320, ceil(textSize.width))
+        let paddingX: CGFloat = 6
+        let paddingY: CGFloat = 4
+        let spacing: CGFloat = 5
+        let iconSize = NSSize(width: 16, height: 16)
+        let imageSize = NSSize(
+            width: paddingX * 2 + iconSize.width + spacing + textWidth,
+            height: paddingY * 2 + max(iconSize.height, ceil(textSize.height))
+        )
+
+        let image = NSImage(size: imageSize)
+        image.lockFocus()
+
+        let iconRect = NSRect(
+            x: paddingX,
+            y: (imageSize.height - iconSize.height) / 2,
+            width: iconSize.width,
+            height: iconSize.height
+        )
+        icon.draw(in: iconRect)
+
+        let textRect = NSRect(
+            x: iconRect.maxX + spacing,
+            y: (imageSize.height - textSize.height) / 2,
+            width: textWidth,
+            height: textSize.height
+        )
+        attributedTitle.draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+
+        image.unlockFocus()
+        return image
+    }
 }
 
 // MARK: - Menu Actions
 
 extension BooController {
     @objc func newWindow(_ sender: Any?) {
-        _ = BooController.newWindow(
-            ghostty,
-            withBaseConfig: state.inheritedConfigForFocusedSurface(
+        state.newWorkspace(
+            baseConfig: state.inheritedConfigForFocusedSurface(
                 context: GHOSTTY_SURFACE_CONTEXT_WINDOW
             )
         )

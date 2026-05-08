@@ -26,6 +26,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
 
+    private var menuNewWorkspace: NSMenuItem?
     @IBOutlet private var menuNewWindow: NSMenuItem?
     @IBOutlet private var menuNewTab: NSMenuItem?
     @IBOutlet private var menuSplitRight: NSMenuItem?
@@ -949,8 +950,20 @@ class AppDelegate: NSObject,
         // UpdateSimulator.happyPath.simulate(with: updateViewModel)
     }
 
+    @IBAction func newWorkspace(_ sender: Any?) {
+        if let state = BooController.all
+            .first(where: { $0.window?.isKeyWindow == true })?.state {
+            state.newWorkspace(
+                baseConfig: state.inheritedConfigForFocusedSurface(
+                    context: GHOSTTY_SURFACE_CONTEXT_WINDOW
+                )
+            )
+        } else {
+            _ = BooController.newWindow(ghostty)
+        }
+    }
+
     @IBAction func newWindow(_ sender: Any?) {
-        // Boo: menu File > New Window opens a Boo window.
         _ = BooController.newWindow(ghostty)
     }
 
@@ -1100,10 +1113,29 @@ extension AppDelegate {
         dockMenu.addItem(newTab)
     }
 
+    private func installBooWorkspaceMenuItem() {
+        guard menuNewWorkspace == nil,
+              let menu = menuNewWindow?.menu,
+              let newWindow = menuNewWindow else { return }
+
+        let item = NSMenuItem(
+            title: "New Workspace",
+            action: #selector(newWorkspace(_:)),
+            keyEquivalent: "n"
+        )
+        item.target = self
+        item.keyEquivalentModifierMask = .command
+        item.setImageIfDesired(systemSymbolName: "square.stack.3d.up")
+
+        menu.insertItem(item, at: menu.index(of: newWindow))
+        menuNewWorkspace = item
+    }
+
     /// Setup all the images for our menu items.
     private func setupMenuImages() {
         // Note: This COULD Be done all in the xib file, but I find it easier to
         // modify this stuff as code.
+        installBooWorkspaceMenuItem()
         self.menuAbout?.setImageIfDesired(systemSymbolName: "info.circle")
         self.menuCheckForUpdates?.setImageIfDesired(systemSymbolName: "square.and.arrow.down")
         self.menuOpenConfig?.setImageIfDesired(systemSymbolName: "gear")
@@ -1155,7 +1187,10 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "reload_config", menuItem: self.menuReloadConfig)
         syncMenuShortcut(config, action: "quit", menuItem: self.menuQuit)
 
-        syncMenuShortcut(config, action: "new_window", menuItem: self.menuNewWindow)
+        self.menuNewWorkspace?.keyEquivalent = "n"
+        self.menuNewWorkspace?.keyEquivalentModifierMask = .command
+        self.menuNewWindow?.keyEquivalent = "n"
+        self.menuNewWindow?.keyEquivalentModifierMask = [.command, .shift]
         syncMenuShortcut(config, action: "new_tab", menuItem: self.menuNewTab)
         syncMenuShortcut(config, action: "close_surface", menuItem: self.menuClose)
         syncMenuShortcut(config, action: "close_tab", menuItem: self.menuCloseTab)
