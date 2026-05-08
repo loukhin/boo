@@ -190,7 +190,7 @@ enum UpdateState: Equatable {
         return false
     }
 
-    /// This is true if we're in a state that can be force installed. 
+    /// This is true if we're in a state that can be force installed.
     var isInstallable: Bool {
         switch self {
         case .checking,
@@ -277,7 +277,7 @@ enum UpdateState: Equatable {
         let reply: @Sendable (SPUUserUpdateChoice) -> Void
 
         var releaseNotes: ReleaseNotes? {
-            let currentCommit = Bundle.main.infoDictionary?["GhosttyCommit"] as? String
+            let currentCommit = Bundle.main.infoDictionary?["BooCommit"] as? String
             return ReleaseNotes(displayVersionString: appcastItem.displayVersionString, currentCommit: currentCommit)
         }
     }

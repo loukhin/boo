@@ -72,8 +72,7 @@ echo ">> [3/7] stamp Info.plist"
 PLIST="${APP_PATH}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${PLIST}" || true
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BUILD_COMMIT}" "${PLIST}" || true
-# If you have the GhosttyCommit key in your plist, uncomment:
-# /usr/libexec/PlistBuddy -c "Set :GhosttyCommit ${BUILD_COMMIT}" "${PLIST}" || true
+/usr/libexec/PlistBuddy -c "Set :BooCommit ${BUILD_COMMIT}" "${PLIST}" || true
 
 if [[ -n "${BOO_SPARKLE_PUB:-}" ]]; then
   # SUPublicEDKey is intentionally absent from the committed Info.plist
