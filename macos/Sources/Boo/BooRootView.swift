@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import GhosttyKit
 
@@ -75,27 +76,69 @@ private struct BooWorkspaceSidebar: View {
     @ObservedObject var state: BooState
     @State private var hoveredWorkspaceId: WorkspaceID?
     @State private var hoveredCloseWorkspaceId: WorkspaceID?
+    @State private var scrollOffset: CGFloat = 0
+    @State private var contentHeight: CGFloat = 0
+    @State private var viewportHeight: CGFloat = 0
+
+    private var canScrollUp: Bool {
+        scrollOffset > 1
+    }
+
+    private var canScrollDown: Bool {
+        contentHeight > viewportHeight && scrollOffset < contentHeight - viewportHeight - 1
+    }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(state.workspaces) { workspace in
-                        workspaceRow(workspace: workspace)
-                            .id(workspace.id)
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    ZStack(alignment: .topLeading) {
+                        BooSidebarWindowDragZoneView()
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: geometry.size.height)
+
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(state.workspaces) { workspace in
+                                workspaceRow(workspace: workspace)
+                                    .id(workspace.id)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 4)
+                        .padding(.bottom, 14)
                     }
+                    .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
+                    .background(
+                        GeometryReader { contentGeometry in
+                            Color.clear
+                                .onChange(
+                                    of: contentGeometry.frame(in: .named("workspaceSidebarScroll"))
+                                ) { _, newFrame in
+                                    scrollOffset = -newFrame.minY
+                                    contentHeight = newFrame.height
+                                }
+                                .onAppear {
+                                    let frame = contentGeometry.frame(in: .named("workspaceSidebarScroll"))
+                                    scrollOffset = -frame.minY
+                                    contentHeight = frame.height
+                                }
+                        }
+                    )
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 4)
-                .padding(.bottom, 14)
-            }
-            .scrollIndicators(.automatic)
-            .scrollClipDisabled(false)
-            .onAppear {
-                scrollToActiveWorkspace(with: proxy, animated: false)
-            }
-            .onChange(of: state.activeWorkspaceId) { _, _ in
-                scrollToActiveWorkspace(with: proxy)
+                .coordinateSpace(name: "workspaceSidebarScroll")
+                .mask(sidebarScrollMask)
+                .scrollIndicators(.automatic)
+                .scrollClipDisabled(false)
+                .onAppear {
+                    viewportHeight = geometry.size.height
+                    scrollToActiveWorkspace(with: proxy, animated: false)
+                }
+                .onChange(of: geometry.size.height) { _, newHeight in
+                    viewportHeight = newHeight
+                }
+                .onChange(of: state.activeWorkspaceId) { _, _ in
+                    scrollToActiveWorkspace(with: proxy)
+                }
             }
         }
         .frame(width: 180)
@@ -107,8 +150,20 @@ private struct BooWorkspaceSidebar: View {
                 .fill(Color(nsColor: .separatorColor))
                 .frame(width: TabBarMetrics.dividerThickness)
         }
-        .overlay(alignment: .trailing) {
-        WindowDragZoneView()
+    }
+
+    @ViewBuilder
+    private var sidebarScrollMask: some View {
+        let fadeHeight: CGFloat = 24
+
+        VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: canScrollUp ? fadeHeight : 0)
+
+            Rectangle().fill(Color.black)
+
+            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: canScrollDown ? fadeHeight : 0)
         }
     }
 
@@ -119,17 +174,14 @@ private struct BooWorkspaceSidebar: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .foregroundStyle(workspaceRowTextColor(for: workspace))
 
             Button {
                 state.closeWorkspace(workspace.id)
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: TabBarMetrics.closeIconSize, weight: .semibold))
-                    .foregroundStyle(
-                        hoveredCloseWorkspaceId == workspace.id ?
-                            TabBarColors.activeText :
-                            TabBarColors.inactiveText
-                    )
+                    .foregroundStyle(workspaceRowCloseIconColor(for: workspace))
                     .frame(
                         width: TabBarMetrics.closeButtonSize,
                         height: TabBarMetrics.closeButtonSize
@@ -175,7 +227,7 @@ private struct BooWorkspaceSidebar: View {
 
     private func workspaceRowBackground(for workspace: BooWorkspace) -> Color {
         if workspace.id == state.activeWorkspaceId {
-            return Color.accentColor.opacity(hoveredWorkspaceId == workspace.id ? 0.24 : 0.18)
+            return Color.accentColor
         }
 
         if hoveredWorkspaceId == workspace.id {
@@ -183,6 +235,26 @@ private struct BooWorkspaceSidebar: View {
         }
 
         return Color.clear
+    }
+
+    private func workspaceRowTextColor(for workspace: BooWorkspace) -> Color {
+        if workspace.id == state.activeWorkspaceId {
+            return Color(nsColor: .alternateSelectedControlTextColor)
+        }
+
+        return TabBarColors.inactiveText
+    }
+
+    private func workspaceRowCloseIconColor(for workspace: BooWorkspace) -> Color {
+        if workspace.id == state.activeWorkspaceId {
+            return Color(nsColor: .alternateSelectedControlTextColor)
+        }
+
+        if hoveredCloseWorkspaceId == workspace.id {
+            return TabBarColors.activeText
+        }
+
+        return TabBarColors.inactiveText
     }
 
     private func scrollToActiveWorkspace(with proxy: ScrollViewProxy, animated: Bool = true) {
@@ -200,7 +272,7 @@ private struct BooWorkspaceSidebar: View {
 }
 
 @discardableResult
-private func performStandardWindowDragOrDoubleClick(window: NSWindow?, event: NSEvent) -> Bool {
+private func performBooSidebarWindowDragOrDoubleClick(window: NSWindow?, event: NSEvent) -> Bool {
     guard let window else { return false }
 
     if event.clickCount >= 2 {
@@ -222,7 +294,7 @@ private func performStandardWindowDragOrDoubleClick(window: NSWindow?, event: NS
     return true
 }
 
-private struct WindowDragZoneView: NSViewRepresentable {
+private struct BooSidebarWindowDragZoneView: NSViewRepresentable {
     func makeNSView(context: Context) -> DragZoneNSView {
         DragZoneNSView()
     }
@@ -237,7 +309,7 @@ private struct WindowDragZoneView: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
-            if !performStandardWindowDragOrDoubleClick(window: window, event: event) {
+            if !performBooSidebarWindowDragOrDoubleClick(window: window, event: event) {
                 super.mouseDown(with: event)
             }
         }
