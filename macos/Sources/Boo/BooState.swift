@@ -87,8 +87,11 @@ final class BooState: ObservableObject {
     @Published private(set) var isChangingFocus = false
 
     /// Terminal background color from config, including configured opacity.
-    /// Used by Boo chrome to match the rendered surface background.
+    /// Used by terminal-connected surfaces and active tabs.
     @Published private(set) var terminalBackgroundColor: Color
+
+    /// Subtly shifted background for Boo chrome around the terminal.
+    @Published private(set) var terminalChromeBackgroundColor: Color
 
     /// Whether this window is currently the key window.
     @Published private(set) var isWindowKey: Bool = true
@@ -140,7 +143,8 @@ final class BooState: ObservableObject {
 
     init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
         self.ghostty = ghostty
-        self.terminalBackgroundColor = Self.terminalBackgroundColor(for: ghostty.config)
+        self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: ghostty.config)
+        self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: ghostty.config)
 
         subscribeToGhosttyNotifications()
 
@@ -152,7 +156,8 @@ final class BooState: ObservableObject {
     /// Init with an existing surface (for drag-out-to-new-window).
     init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
         self.ghostty = ghostty
-        self.terminalBackgroundColor = Self.terminalBackgroundColor(for: ghostty.config)
+        self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: ghostty.config)
+        self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: ghostty.config)
 
         subscribeToGhosttyNotifications()
 
@@ -160,10 +165,6 @@ final class BooState: ObservableObject {
         // creating a new one.
         let workspaceId = createWorkspace(existingSurface: existingSurface)
         activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
-    }
-
-    private static func terminalBackgroundColor(for config: Ghostty.Config) -> Color {
-        config.backgroundColor.opacity(min(1, max(0, config.backgroundOpacity)))
     }
 
     private func makeWorkspaceController() -> BonsplitController {
@@ -873,7 +874,8 @@ final class BooState: ObservableObject {
         // Update background color from new config.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.terminalBackgroundColor = Self.terminalBackgroundColor(for: self.ghostty.config)
+            self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: self.ghostty.config)
+            self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: self.ghostty.config)
         }
     }
 

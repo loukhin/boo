@@ -15,7 +15,7 @@ extension UTType {
 struct TabBarView: View {
     @Environment(BonsplitController.self) private var controller
     @Environment(SplitViewController.self) private var splitViewController
-    @Environment(\.terminalBackgroundColor) private var backgroundColor
+    @Environment(\.terminalChromeBackgroundColor) private var chromeBackgroundColor
 
     @Bindable var pane: PaneState
     var showSplitButtons: Bool = true
@@ -399,9 +399,7 @@ struct TabBarView: View {
 
     @ViewBuilder
     private var tabBarBackground: some View {
-        // Use the terminal background so tab chrome stays visually connected
-        // to the surface even when the window itself is transparent.
-        backgroundColor
+        tabBarChromeBackground
             .overlay(alignment: .top) {
                 Rectangle()
                     .fill(TabBarColors.separator)
@@ -412,33 +410,49 @@ struct TabBarView: View {
             }
     }
 
+    private var tabBarChromeBackground: some View {
+        GeometryReader { geometry in
+            segmentedHorizontalFill(
+                color: chromeBackgroundColor,
+                geometry: geometry
+            )
+        }
+    }
+
     private var bottomSeparator: some View {
         GeometryReader { geometry in
-            let gap = selectedTabFrame.map { frame in
-                CGRect(
-                    x: min(max(frame.minX, 0), geometry.size.width),
-                    y: 0,
-                    width: max(0, frame.width),
-                    height: 1
-                )
-            }
-            let gapStart = gap?.minX ?? geometry.size.width
-            let gapEnd = min(gap?.maxX ?? geometry.size.width, geometry.size.width)
-
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(TabBarColors.separator)
-                    .frame(width: gapStart)
-
-                Color.clear
-                    .frame(width: max(0, gapEnd - gapStart))
-
-                Rectangle()
-                    .fill(TabBarColors.separator)
-                    .frame(width: max(0, geometry.size.width - gapEnd))
-            }
+            segmentedHorizontalFill(
+                color: TabBarColors.separator,
+                geometry: geometry
+            )
         }
         .frame(height: 1)
+    }
+
+    private func segmentedHorizontalFill(color: Color, geometry: GeometryProxy) -> some View {
+        let gap = selectedTabFrame.map { frame in
+            CGRect(
+                x: min(max(frame.minX, 0), geometry.size.width),
+                y: 0,
+                width: max(0, frame.width),
+                height: 1
+            )
+        }
+        let gapStart = gap?.minX ?? geometry.size.width
+        let gapEnd = min(gap?.maxX ?? geometry.size.width, geometry.size.width)
+
+        return HStack(spacing: 0) {
+            Rectangle()
+                .fill(color)
+                .frame(width: gapStart)
+
+            Color.clear
+                .frame(width: max(0, gapEnd - gapStart))
+
+            Rectangle()
+                .fill(color)
+                .frame(width: max(0, geometry.size.width - gapEnd))
+        }
     }
 }
 

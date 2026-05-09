@@ -291,12 +291,11 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     private func applyWindowTheme() {
         guard let window else { return }
-        if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
-            window.appearance = appearance
-        }
+        window.appearance = NSAppearance(ghosttyConfig: ghostty.config)
 
         let backgroundColor = NSColor(ghostty.config.backgroundColor).usingColorSpace(.sRGB)
             ?? NSColor.windowBackgroundColor
+        let chromeBackgroundColor = BooChromeColors.chromeBackgroundColor(from: backgroundColor)
         let canUseTransparency = !window.styleMask.contains(.fullScreen)
             && !isBackgroundOpaque
             && (ghostty.config.backgroundOpacity < 1 || ghostty.config.backgroundBlur.isGlassStyle)
@@ -313,15 +312,15 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             }
         } else {
             window.isOpaque = true
-            window.backgroundColor = backgroundColor.withAlphaComponent(1)
+            window.backgroundColor = chromeBackgroundColor.withAlphaComponent(1)
         }
 
-        applyTitlebarBackground(color: backgroundColor)
+        applyTitlebarBackground(color: chromeBackgroundColor)
     }
 
     private func applyTitlebarBackground(color: NSColor) {
         guard let titlebarContainer else { return }
-        let opacity = isBackgroundOpaque ? 1 : ghostty.config.backgroundOpacity.clamped(to: 0.001...1)
+        let opacity = isBackgroundOpaque ? 1 : max(0.001, BooChromeColors.clampedBackgroundOpacity(for: ghostty.config))
         titlebarContainer.wantsLayer = true
         titlebarContainer.layer?.backgroundColor = color.withAlphaComponent(opacity).cgColor
     }

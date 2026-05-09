@@ -73,7 +73,7 @@ struct BooWorkspaceSidebar: View {
         .frame(width: 180)
         .frame(maxHeight: .infinity, alignment: .top)
         .clipped()
-        .background(state.terminalBackgroundColor)
+        .background(state.terminalChromeBackgroundColor)
         .overlay(alignment: .trailing) {
             Rectangle()
                 .fill(Color(nsColor: .separatorColor))

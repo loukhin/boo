@@ -12,6 +12,7 @@ struct TabItemView: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
+    @Environment(\.terminalBackgroundColor) private var backgroundColor
     @State private var isHovered = false
     @State private var isCloseHovered = false
 
@@ -77,10 +78,11 @@ struct TabItemView: View {
     @ViewBuilder
     private var tabBackground: some View {
         ZStack(alignment: .top) {
-            // Keep the selected tab transparent. Filling it with the same
-            // semi-transparent terminal background would composite over the
-            // tab bar background and make the active tab look opaque.
-            Color.clear
+            if isSelected {
+                backgroundColor
+            } else {
+                Color.clear
+            }
 
             // Top accent indicator for selected tab. Desaturated when the
             // owning pane is inactive so the bar as a whole still reads as
