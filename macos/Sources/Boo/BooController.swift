@@ -441,24 +441,21 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     private func handleBooKeyDown(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        guard let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
 
-        if flags == [.command], let index = Self.workspaceShortcutIndex(for: key) {
+        // Leave ⌘1–⌘9 alone so Ghostty's normal `goto_tab` keybindings keep
+        // owning tab selection. Boo only claims the workspace-specific layer:
+        // Control plus a number switches workspaces.
+        if flags == [.control], let index = Self.numberShortcutIndex(for: event) {
             state.switchToWorkspace(at: index)
             return true
         }
 
-        if flags == [.control], let index = Self.workspaceShortcutIndex(for: key) {
-            state.selectTab(at: index)
-            return true
-        }
-
-        if flags == [.command], key == "s" {
+        if flags == [.command], Self.isKey(event, characters: "s", keyCode: 0x01) {
             state.toggleWorkspaceSidebar()
             return true
         }
 
-        if flags == [.command], key == "n" {
+        if flags == [.command], Self.isKey(event, characters: "n", keyCode: 0x2D) {
             state.newWorkspace(
                 baseConfig: state.inheritedConfigForFocusedSurface(
                     context: GHOSTTY_SURFACE_CONTEXT_WINDOW
@@ -467,7 +464,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             return true
         }
 
-        if flags == [.command, .shift], key == "n" {
+        if flags == [.command, .shift], Self.isKey(event, characters: "n", keyCode: 0x2D) {
             _ = BooController.newWindow(
                 ghostty,
                 withBaseConfig: state.inheritedConfigForFocusedSurface(
@@ -480,9 +477,39 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         return false
     }
 
-    private static func workspaceShortcutIndex(for key: String) -> Int? {
-        guard key.count == 1, let value = Int(key), (1...9).contains(value) else { return nil }
-        return value - 1
+    private static func numberShortcutIndex(for event: NSEvent) -> Int? {
+        if let key = event.charactersIgnoringModifiers,
+           key.count == 1,
+           let value = Int(key),
+           (1...9).contains(value) {
+            return value - 1
+        }
+
+        switch event.keyCode {
+        case 0x12: return 0 // ANSI 1
+        case 0x13: return 1 // ANSI 2
+        case 0x14: return 2 // ANSI 3
+        case 0x15: return 3 // ANSI 4
+        case 0x17: return 4 // ANSI 5
+        case 0x16: return 5 // ANSI 6
+        case 0x1A: return 6 // ANSI 7
+        case 0x1C: return 7 // ANSI 8
+        case 0x19: return 8 // ANSI 9
+        case 0x53: return 0 // Keypad 1
+        case 0x54: return 1 // Keypad 2
+        case 0x55: return 2 // Keypad 3
+        case 0x56: return 3 // Keypad 4
+        case 0x57: return 4 // Keypad 5
+        case 0x58: return 5 // Keypad 6
+        case 0x59: return 6 // Keypad 7
+        case 0x5B: return 7 // Keypad 8
+        case 0x5C: return 8 // Keypad 9
+        default: return nil
+        }
+    }
+
+    private static func isKey(_ event: NSEvent, characters: String, keyCode: UInt16) -> Bool {
+        event.charactersIgnoringModifiers?.lowercased() == characters || event.keyCode == keyCode
     }
 }
 
@@ -1023,5 +1050,4 @@ extension BooController: NSWindowDelegate {
         state.refocusCurrentSurface()
     }
 }
-
 
