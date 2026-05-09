@@ -15,6 +15,7 @@ extension UTType {
 struct TabBarView: View {
     @Environment(BonsplitController.self) private var controller
     @Environment(SplitViewController.self) private var splitViewController
+    @Environment(\.terminalBackgroundColor) private var backgroundColor
 
     @Bindable var pane: PaneState
     var showSplitButtons: Bool = true
@@ -23,6 +24,7 @@ struct TabBarView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var contentWidth: CGFloat = 0
     @State private var containerWidth: CGFloat = 0
+    @State private var selectedTabFrame: CGRect?
 
     private var canScrollLeft: Bool {
         scrollOffset > 1
@@ -62,7 +64,6 @@ struct TabBarView: View {
     /// instead of a huge dead gap.
     private let splitButtonMaskClearWidth: CGFloat = 64
     private let splitButtonMaskFadeWidth: CGFloat = 12
-
 
     var body: some View {
         GeometryReader { containerGeo in
@@ -147,6 +148,10 @@ struct TabBarView: View {
             }
         }
         .frame(height: TabBarMetrics.barHeight)
+        .coordinateSpace(name: "tabBar")
+        .onPreferenceChange(SelectedTabFramePreferenceKey.self) { frame in
+            selectedTabFrame = frame
+        }
         .contentShape(Rectangle())
         .background(tabBarBackground)
     }
@@ -176,6 +181,16 @@ struct TabBarView: View {
         } preview: {
             TabDragPreview(tab: tab)
         }
+        .background {
+            if pane.selectedTabId == tab.id {
+                GeometryReader { geometry in
+                    Color.clear.preference(
+                        key: SelectedTabFramePreferenceKey.self,
+                        value: geometry.frame(in: .named("tabBar"))
+                    )
+                }
+            }
+        }
         .onDrop(of: [.bonsplitTab], delegate: TabDropDelegate(
             targetIndex: index,
             pane: pane,
@@ -204,7 +219,7 @@ struct TabBarView: View {
         guard let data = try? JSONEncoder().encode(transfer) else {
             return NSItemProvider()
         }
-        
+
         // Use custom UTType so other apps won't accept the drop
         let provider = NSItemProvider()
         provider.registerDataRepresentation(forTypeIdentifier: UTType.bonsplitTab.identifier, visibility: .ownProcess) { completion in
@@ -219,29 +234,29 @@ struct TabBarView: View {
         var timer: Timer?
         timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak splitViewController] _ in
             let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
-            
+
             if !mouseDown {
                 timer?.invalidate()
                 timer = nil
-                
+
                 let screenPoint = NSEvent.mouseLocation
-                
+
                 // Delay to let SwiftUI's drop handling complete first
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     guard let controller = splitViewController else { return }
-                    
+
                     // If draggingTab is still set, no valid drop occurred
                     if controller.draggingTab != nil {
                         // Check if dropped outside all app windows
                         let inWindow = NSApp.windows.contains { window in
                             window.isVisible && window.frame.contains(screenPoint)
                         }
-                        
+
                         if !inWindow {
                             // Trigger "dropped outside" callback
                             controller.onTabDragEndedOutside?(tab, sourcePaneId, screenPoint)
                         }
-                        
+
                         // Clear drag state
                         controller.draggingTab = nil
                         controller.dragSourcePaneId = nil
@@ -384,19 +399,54 @@ struct TabBarView: View {
 
     @ViewBuilder
     private var tabBarBackground: some View {
-        // Use clear background to let window background show through
-        // Both top and bottom borders on tab bar
-        Color.clear
+        // Use the terminal background so tab chrome stays visually connected
+        // to the surface even when the window itself is transparent.
+        backgroundColor
             .overlay(alignment: .top) {
                 Rectangle()
                     .fill(TabBarColors.separator)
                     .frame(height: 1)
             }
             .overlay(alignment: .bottom) {
+                bottomSeparator
+            }
+    }
+
+    private var bottomSeparator: some View {
+        GeometryReader { geometry in
+            let gap = selectedTabFrame.map { frame in
+                CGRect(
+                    x: min(max(frame.minX, 0), geometry.size.width),
+                    y: 0,
+                    width: max(0, frame.width),
+                    height: 1
+                )
+            }
+            let gapStart = gap?.minX ?? geometry.size.width
+            let gapEnd = min(gap?.maxX ?? geometry.size.width, geometry.size.width)
+
+            HStack(spacing: 0) {
                 Rectangle()
                     .fill(TabBarColors.separator)
-                    .frame(height: 1)
+                    .frame(width: gapStart)
+
+                Color.clear
+                    .frame(width: max(0, gapEnd - gapStart))
+
+                Rectangle()
+                    .fill(TabBarColors.separator)
+                    .frame(width: max(0, geometry.size.width - gapEnd))
             }
+        }
+        .frame(height: 1)
+    }
+}
+
+private struct SelectedTabFramePreferenceKey: PreferenceKey {
+    static let defaultValue: CGRect? = nil
+
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        value = nextValue() ?? value
     }
 }
 
@@ -471,7 +521,7 @@ struct TabDropDelegate: DropDelegate {
               let sourcePaneId = controller.dragSourcePaneId else {
             return false
         }
-        
+
         // Clear drag state
         let draggedTab = tab
         let sourceId = sourcePaneId

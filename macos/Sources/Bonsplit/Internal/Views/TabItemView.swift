@@ -12,7 +12,6 @@ struct TabItemView: View {
     let onSelect: () -> Void
     let onClose: () -> Void
 
-    @Environment(\.terminalBackgroundColor) private var backgroundColor
     @State private var isHovered = false
     @State private var isCloseHovered = false
 
@@ -58,15 +57,6 @@ struct TabItemView: View {
         // pick up `otherMouseUp` without stealing left/right clicks from the
         // SwiftUI tap/drag gestures below.
         .overlay(MiddleClickCloseView(onMiddleClick: onClose))
-        // Selected tab covers the tab bar's bottom border
-        .overlay(alignment: .bottom) {
-            if isSelected {
-                Rectangle()
-                    .fill(backgroundColor)
-                    .frame(height: 2)
-                    .offset(y: 1)
-            }
-        }
         .zIndex(isSelected ? 1 : 0)
         .onTapGesture {
             onSelect()
@@ -87,14 +77,10 @@ struct TabItemView: View {
     @ViewBuilder
     private var tabBackground: some View {
         ZStack(alignment: .top) {
-            // Selected tab uses the terminal background so it visually
-            // connects to the pane below. Other tabs stay transparent so the
-            // (slightly lighter) tab-bar chrome shows through.
-            if isSelected {
-                backgroundColor
-            } else {
-                Color.clear
-            }
+            // Keep the selected tab transparent. Filling it with the same
+            // semi-transparent terminal background would composite over the
+            // tab bar background and make the active tab look opaque.
+            Color.clear
 
             // Top accent indicator for selected tab. Desaturated when the
             // owning pane is inactive so the bar as a whole still reads as

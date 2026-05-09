@@ -21,6 +21,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     let state: BooState
     private let ghostty: Ghostty.App
     private var keyDownMonitor: Any?
+    private var isBackgroundOpaque = false
 
     // MARK: - Factory
 
@@ -293,7 +294,58 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
             window.appearance = appearance
         }
-        window.backgroundColor = NSColor(ghostty.config.backgroundColor).usingColorSpace(.sRGB)
+
+        let backgroundColor = NSColor(ghostty.config.backgroundColor).usingColorSpace(.sRGB)
+            ?? NSColor.windowBackgroundColor
+        let canUseTransparency = !window.styleMask.contains(.fullScreen)
+            && !isBackgroundOpaque
+            && (ghostty.config.backgroundOpacity < 1 || ghostty.config.backgroundBlur.isGlassStyle)
+
+        if canUseTransparency {
+            window.isOpaque = false
+            window.backgroundColor = .white.withAlphaComponent(0.001)
+
+            if !ghostty.config.backgroundBlur.isGlassStyle {
+                ghostty_set_window_background_blur(
+                    ghostty.app,
+                    Unmanaged.passUnretained(window).toOpaque()
+                )
+            }
+        } else {
+            window.isOpaque = true
+            window.backgroundColor = backgroundColor.withAlphaComponent(1)
+        }
+
+        applyTitlebarBackground(color: backgroundColor)
+    }
+
+    private func applyTitlebarBackground(color: NSColor) {
+        guard let titlebarContainer else { return }
+        let opacity = isBackgroundOpaque ? 1 : ghostty.config.backgroundOpacity.clamped(to: 0.001...1)
+        titlebarContainer.wantsLayer = true
+        titlebarContainer.layer?.backgroundColor = color.withAlphaComponent(opacity).cgColor
+    }
+
+    private var titlebarContainer: NSView? {
+        if window?.styleMask.contains(.fullScreen) != true {
+            return window?.contentView?.firstViewFromRoot(withClassName: "NSTitlebarContainerView")
+        }
+
+        for candidate in NSApplication.shared.windows {
+            guard candidate.className == "NSToolbarFullScreenWindow",
+                  candidate.parent == window else { continue }
+            return candidate.contentView?.firstViewFromRoot(withClassName: "NSTitlebarContainerView")
+        }
+
+        return nil
+    }
+
+    func toggleBackgroundOpacity() {
+        guard ghostty.config.backgroundOpacity < 1 else { return }
+        guard let window, !window.styleMask.contains(.fullScreen) else { return }
+
+        isBackgroundOpaque.toggle()
+        applyWindowTheme()
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
@@ -952,6 +1004,14 @@ extension BooController: NSWindowDelegate {
     func windowDidDeminiaturize(_ notification: Notification) {
         state.setWindowKey(window?.isKeyWindow == true)
         state.refocusCurrentSurface()
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        applyWindowTheme()
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        applyWindowTheme()
     }
 }
 

@@ -86,8 +86,8 @@ final class BooState: ObservableObject {
     /// callbacks are suppressed to avoid oscillation loops.
     @Published private(set) var isChangingFocus = false
 
-    /// Terminal background color from config, updated on config reload.
-    /// Used by the tab bar to match the window background.
+    /// Terminal background color from config, including configured opacity.
+    /// Used by Boo chrome to match the rendered surface background.
     @Published private(set) var terminalBackgroundColor: Color
 
     /// Whether this window is currently the key window.
@@ -108,9 +108,7 @@ final class BooState: ObservableObject {
     /// attached SurfaceView synchronously while cold workspaces are unmounted.
     @Published private(set) var mountedWorkspaceIds: Set<WorkspaceID> = []
 
-    private let recentMountedWorkspaceLimit = 2
-    private var recentlyActiveWorkspaceIds: [WorkspaceID] = []
-    private var pendingWorkspaceActivationId: WorkspaceID?
+    private let workspaceMounting = BooWorkspaceMounting()
 
     /// Flag to skip auto-focus during tab drag-out operations.
     private var isDraggingTabOut: Bool = false
@@ -142,7 +140,7 @@ final class BooState: ObservableObject {
 
     init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
         self.ghostty = ghostty
-        self.terminalBackgroundColor = ghostty.config.backgroundColor
+        self.terminalBackgroundColor = Self.terminalBackgroundColor(for: ghostty.config)
 
         subscribeToGhosttyNotifications()
 
@@ -154,7 +152,7 @@ final class BooState: ObservableObject {
     /// Init with an existing surface (for drag-out-to-new-window).
     init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
         self.ghostty = ghostty
-        self.terminalBackgroundColor = ghostty.config.backgroundColor
+        self.terminalBackgroundColor = Self.terminalBackgroundColor(for: ghostty.config)
 
         subscribeToGhosttyNotifications()
 
@@ -162,6 +160,10 @@ final class BooState: ObservableObject {
         // creating a new one.
         let workspaceId = createWorkspace(existingSurface: existingSurface)
         activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
+    }
+
+    private static func terminalBackgroundColor(for config: Ghostty.Config) -> Color {
+        config.backgroundColor.opacity(min(1, max(0, config.backgroundOpacity)))
     }
 
     private func makeWorkspaceController() -> BonsplitController {
@@ -324,6 +326,25 @@ final class BooState: ObservableObject {
         return "Boo"
     }
 
+    func workspaceDisplayPWD(_ workspace: BooWorkspace) -> String? {
+        guard let tabId = selectedTabId(in: workspace),
+              let pwd = surfaces[tabId]?.pwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !pwd.isEmpty else { return nil }
+
+        return abbreviatedPath(pwd)
+    }
+
+    private func abbreviatedPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path == home {
+            return "~"
+        }
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
     func renameWorkspace(_ id: WorkspaceID) {
         guard let workspace = workspaces.first(where: { $0.id == id }) else { return }
         let alert = NSAlert()
@@ -387,12 +408,13 @@ final class BooState: ObservableObject {
     private func activateWorkspace(_ activation: WorkspaceActivation) {
         guard workspaces.contains(where: { $0.id == activation.id }) else { return }
 
-        let canActivateNow = activeWorkspaceId == activation.id
-            || mountedWorkspaceIds.contains(activation.id)
-            || !activation.reason.shouldFocus
-
-        if canActivateNow {
-            pendingWorkspaceActivationId = nil
+        if workspaceMounting.canActivateNow(
+            id: activation.id,
+            activeWorkspaceId: activeWorkspaceId,
+            mountedWorkspaceIds: mountedWorkspaceIds,
+            shouldFocus: activation.reason.shouldFocus
+        ) {
+            workspaceMounting.clearPendingActivation(activation.id)
             applyWorkspaceActivation(activation)
             return
         }
@@ -401,11 +423,11 @@ final class BooState: ObservableObject {
         // active. This keeps arbitrary workspace switches and repeated
         // Command-N creation from racing AppKit attachment while avoiding
         // permanently mounted cold workspaces.
-        pendingWorkspaceActivationId = activation.id
+        workspaceMounting.prepareColdActivation(id: activation.id)
         refreshMountedWorkspaces(keeping: [activation.id])
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.pendingWorkspaceActivationId == activation.id else { return }
-            self.pendingWorkspaceActivationId = nil
+            guard let self, self.workspaceMounting.isPendingActivation(activation.id) else { return }
+            self.workspaceMounting.clearPendingActivation(activation.id)
             self.applyWorkspaceActivation(activation)
         }
     }
@@ -414,11 +436,7 @@ final class BooState: ObservableObject {
         guard workspaces.contains(where: { $0.id == activation.id }) else { return }
 
         if activeWorkspaceId != activation.id {
-            if let activeWorkspaceId {
-                recentlyActiveWorkspaceIds.removeAll { $0 == activeWorkspaceId }
-                recentlyActiveWorkspaceIds.insert(activeWorkspaceId, at: 0)
-            }
-
+            workspaceMounting.recordActivation(from: activeWorkspaceId, to: activation.id)
             unfocusAllSurfaces()
             focusedOwnedSurface = nil
             activeWorkspaceId = activation.id
@@ -436,36 +454,11 @@ final class BooState: ObservableObject {
     }
 
     private func refreshMountedWorkspaces(keeping extraIds: Set<WorkspaceID> = []) {
-        let ids = workspaces.map(\.id)
-        let validIds = Set(ids)
-        recentlyActiveWorkspaceIds = recentlyActiveWorkspaceIds.filter { validIds.contains($0) }
-        if let pendingWorkspaceActivationId, !validIds.contains(pendingWorkspaceActivationId) {
-            self.pendingWorkspaceActivationId = nil
-        }
-
-        var mounted = extraIds.intersection(validIds)
-        if let pendingWorkspaceActivationId, validIds.contains(pendingWorkspaceActivationId) {
-            mounted.insert(pendingWorkspaceActivationId)
-        }
-
-        if let activeWorkspaceId,
-           let activeIndex = ids.firstIndex(of: activeWorkspaceId) {
-            mounted.insert(activeWorkspaceId)
-
-            if activeIndex > ids.startIndex {
-                mounted.insert(ids[ids.index(before: activeIndex)])
-            }
-            let nextIndex = ids.index(after: activeIndex)
-            if nextIndex < ids.endIndex {
-                mounted.insert(ids[nextIndex])
-            }
-        }
-
-        for id in recentlyActiveWorkspaceIds.prefix(recentMountedWorkspaceLimit) {
-            mounted.insert(id)
-        }
-
-        mountedWorkspaceIds = mounted
+        mountedWorkspaceIds = workspaceMounting.mountedWorkspaceIds(
+            workspaceIds: workspaces.map(\.id),
+            activeWorkspaceId: activeWorkspaceId,
+            keeping: extraIds
+        )
     }
 
     private func removeWorkspace(for controller: BonsplitController) {
@@ -671,7 +664,9 @@ final class BooState: ObservableObject {
         surface.$pwd
             .removeDuplicates()
             .sink { [weak self] newPwd in
-                guard let self, self.windowChromeTabId == tabId else { return }
+                guard let self else { return }
+                self.objectWillChange.send()
+                guard self.windowChromeTabId == tabId else { return }
                 self.applyWindowChrome(title: surface.title, pwd: newPwd)
             }
             .store(in: &subs)
@@ -795,104 +790,114 @@ final class BooState: ObservableObject {
 
     // MARK: - Ghostty notification wiring
 
+    private struct GhosttySurfaceNotificationRoute {
+        let surface: Ghostty.SurfaceView
+        let tabId: TabID
+        let controller: BonsplitController
+        let workspace: BooWorkspace
+        let paneId: PaneID?
+    }
+
     private func subscribeToGhosttyNotifications() {
         let nc = NotificationCenter.default
+        let notifications: [(Notification.Name, Selector)] = [
+            (Ghostty.Notification.ghosttyNewTab, #selector(onGhosttyNewTab(_:))),
+            (Ghostty.Notification.ghosttyNewSplit, #selector(onGhosttyNewSplit(_:))),
+            (Ghostty.Notification.ghosttyCloseSurface, #selector(onGhosttyCloseSurface(_:))),
+            (Ghostty.Notification.ghosttyFocusSplit, #selector(onGhosttyFocusSplit(_:))),
+            (Ghostty.Notification.ghosttyGotoTab, #selector(onGhosttyGotoTab(_:))),
+            (.ghosttySurfaceFocusDidChange, #selector(onGhosttySurfaceFocusDidChange(_:))),
+            (.ghosttyConfigDidChange, #selector(onGhosttyConfigDidChange(_:)))
+        ]
 
-        // Pass `object: nil` because we want to receive notifications from
-        // any surface; we filter inside the handler by checking ownership.
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyNewTab(_:)),
-            name: Ghostty.Notification.ghosttyNewTab,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyNewSplit(_:)),
-            name: Ghostty.Notification.ghosttyNewSplit,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyCloseSurface(_:)),
-            name: Ghostty.Notification.ghosttyCloseSurface,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyFocusSplit(_:)),
-            name: Ghostty.Notification.ghosttyFocusSplit,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyGotoTab(_:)),
-            name: Ghostty.Notification.ghosttyGotoTab,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttySurfaceFocusDidChange(_:)),
-            name: .ghosttySurfaceFocusDidChange,
-            object: nil
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(onGhosttyConfigDidChange(_:)),
-            name: .ghosttyConfigDidChange,
-            object: nil
+        // Pass `object: nil` because Ghostty posts action notifications
+        // globally. Each Boo window routes by ownership before acting.
+        for (name, selector) in notifications {
+            nc.addObserver(self, selector: selector, name: name, object: nil)
+        }
+    }
+
+    private func surfaceRoute(
+        for note: Notification,
+        requirePane: Bool = false
+    ) -> GhosttySurfaceNotificationRoute? {
+        guard let surface = note.object as? Ghostty.SurfaceView else { return nil }
+        return surfaceRoute(for: surface, requirePane: requirePane)
+    }
+
+    private func surfaceRoute(
+        for surface: Ghostty.SurfaceView,
+        requirePane: Bool = false
+    ) -> GhosttySurfaceNotificationRoute? {
+        guard let tabId = tabId(for: surface),
+              let sourceController = controllerContaining(tabId: tabId),
+              let sourceWorkspace = workspace(containing: sourceController) else { return nil }
+
+        let paneId = paneContaining(tabId: tabId, in: sourceController)
+        if requirePane && paneId == nil { return nil }
+
+        return GhosttySurfaceNotificationRoute(
+            surface: surface,
+            tabId: tabId,
+            controller: sourceController,
+            workspace: sourceWorkspace,
+            paneId: paneId
         )
     }
 
+    private func activateWorkspace(for route: GhosttySurfaceNotificationRoute) {
+        activateWorkspace(.init(id: route.workspace.id, reason: .surfaceAction))
+    }
+
+    private func newSurfaceConfig(from note: Notification) -> Ghostty.SurfaceConfiguration? {
+        note.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
+            as? Ghostty.SurfaceConfiguration
+    }
+
+    private func newTabTargetController(for note: Notification) -> BonsplitController? {
+        // Two cases:
+        //   * object is a SurfaceView we own   → create tab in that surface's workspace
+        //   * object is nil/app-level target   → only the key Boo window handles it
+        // If another window owns the originating surface, ignore.
+        if note.object is Ghostty.SurfaceView {
+            guard let route = surfaceRoute(for: note) else { return nil }
+            activateWorkspace(for: route)
+            return route.controller
+        }
+
+        guard window?.isKeyWindow == true else { return nil }
+        return controller
+    }
+
     @objc private func onGhosttyConfigDidChange(_ note: Notification) {
-        // Update background color from new config
+        // Update background color from new config.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.terminalBackgroundColor = self.ghostty.config.backgroundColor
+            self.terminalBackgroundColor = Self.terminalBackgroundColor(for: self.ghostty.config)
         }
     }
 
     @objc private func onGhosttyNewTab(_ note: Notification) {
-        // Two cases:
-        //   * object is a SurfaceView we own          → create tab in this window
-        //   * object is nil (app-level target)        → only the key Boo window handles it
-        // If another window owns the originating surface, ignore.
-        let targetController: BonsplitController
-        if let surface = note.object as? Ghostty.SurfaceView {
-            guard let sourceController = controllerContaining(surface: surface),
-                  let workspace = workspace(containing: sourceController) else { return }
-            activateWorkspace(.init(id: workspace.id, reason: .surfaceAction))
-            targetController = sourceController
-        } else {
-            guard window?.isKeyWindow == true else { return }
-            targetController = controller
-        }
-
-        let cfg = note.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
-            as? Ghostty.SurfaceConfiguration
-        newTab(in: targetController, baseConfig: cfg)
+        guard let targetController = newTabTargetController(for: note) else { return }
+        newTab(in: targetController, baseConfig: newSurfaceConfig(from: note))
     }
 
     @objc private func onGhosttyNewSplit(_ note: Notification) {
-        guard let surface = note.object as? Ghostty.SurfaceView,
-              surfaces.values.contains(where: { $0 === surface }),
+        guard let route = surfaceRoute(for: note),
               let direction = note.userInfo?["direction"]
                 as? ghostty_action_split_direction_e else { return }
 
-        let cfg = note.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
-            as? Ghostty.SurfaceConfiguration
-        splitPane(from: surface, direction: direction, baseConfig: cfg)
+        splitPane(from: route.surface, direction: direction, baseConfig: newSurfaceConfig(from: note))
     }
 
     @objc private func onGhosttyCloseSurface(_ note: Notification) {
-        guard let surface = note.object as? Ghostty.SurfaceView,
-              let tabId = tabId(for: surface),
-              let sourceController = controllerContaining(tabId: tabId) else { return }
+        guard let route = surfaceRoute(for: note) else { return }
+
         // Route through `closeTab` so our `shouldCloseTab` gate handles
         // confirmation uniformly. The `process_alive` hint in the userInfo is
         // equivalent to the surface's `needsConfirmQuit`, which is what the
         // gate already checks.
-        _ = sourceController.closeTab(tabId)
+        _ = route.controller.closeTab(route.tabId)
     }
 
     /// Handle ⌘⌥arrow (and ⌘[ / ⌘] for previous/next) by asking Bonsplit
@@ -901,24 +906,21 @@ final class BooState: ObservableObject {
     /// Bonsplit's own navigation API and then push AppKit focus into the
     /// newly-focused pane's surface.
     @objc private func onGhosttyFocusSplit(_ note: Notification) {
-        guard let surface = note.object as? Ghostty.SurfaceView,
-              let tabId = tabId(for: surface),
-              let sourceController = controllerContaining(tabId: tabId),
-              let sourceWorkspace = workspace(containing: sourceController),
+        guard let route = surfaceRoute(for: note, requirePane: true),
+              let sourcePaneId = route.paneId,
               let direction = note.userInfo?[Ghostty.Notification.SplitDirectionKey]
                 as? Ghostty.SplitFocusDirection,
-              let navDirection = Self.navigationDirection(for: direction),
-              let sourcePaneId = paneContaining(tabId: tabId, in: sourceController) else { return }
+              let navDirection = Self.navigationDirection(for: direction) else { return }
 
-        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
+        activateWorkspace(for: route)
 
         // Sync Bonsplit's focused-pane state with the actual source pane
         // before navigating. `navigateFocus` uses `focusedPaneId` as its
         // starting point; if the user has been navigating via keybinds
         // without clicking, Bonsplit's state should already match, but
         // re-focusing is cheap and avoids drifting.
-        sourceController.focusPane(sourcePaneId)
-        sourceController.navigateFocus(direction: navDirection)
+        route.controller.focusPane(sourcePaneId)
+        route.controller.navigateFocus(direction: navDirection)
 
         // Bonsplit updates `focusedPaneId`, but first-responder still lives
         // on the previous surface. Push AppKit focus into the new pane's
@@ -932,17 +934,14 @@ final class BooState: ObservableObject {
     /// tabs are per-pane, so `goto_tab` targets the pane that owns the
     /// source surface.
     @objc private func onGhosttyGotoTab(_ note: Notification) {
-        guard let surface = note.object as? Ghostty.SurfaceView,
-              let tabId = tabId(for: surface),
-              let sourceController = controllerContaining(tabId: tabId),
-              let sourceWorkspace = workspace(containing: sourceController),
+        guard let route = surfaceRoute(for: note, requirePane: true),
+              let paneId = route.paneId,
               let tabEnum = note.userInfo?[Ghostty.Notification.GotoTabKey]
-                as? ghostty_action_goto_tab_e,
-              let paneId = paneContaining(tabId: tabId, in: sourceController) else { return }
+                as? ghostty_action_goto_tab_e else { return }
 
-        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
+        activateWorkspace(for: route)
 
-        let tabs = sourceController.tabs(inPane: paneId)
+        let tabs = route.controller.tabs(inPane: paneId)
         guard tabs.count > 1 else { return }
 
         // ghostty's goto_tab enum uses:
@@ -950,7 +949,7 @@ final class BooState: ObservableObject {
         //   - negative sentinels for PREVIOUS / NEXT / LAST (with wrap-around
         //     for prev/next to match macOS Terminal behaviour)
         let rawValue = tabEnum.rawValue
-        let currentIndex = tabs.firstIndex(where: { $0.id == tabId }) ?? 0
+        let currentIndex = tabs.firstIndex(where: { $0.id == route.tabId }) ?? 0
         let finalIndex: Int
 
         if rawValue >= 1 {
@@ -966,7 +965,7 @@ final class BooState: ObservableObject {
         }
 
         guard finalIndex != currentIndex else { return }
-        sourceController.selectTab(tabs[finalIndex].id)
+        route.controller.selectTab(tabs[finalIndex].id)
     }
 
     /// Sync Bonsplit pane focus from the actual AppKit surface that became
@@ -978,25 +977,21 @@ final class BooState: ObservableObject {
         // Skip if we're already in the middle of changing focus to avoid loops.
         guard !isChangingFocus else { return }
 
-        guard let surface = note.object as? Ghostty.SurfaceView,
-              surfaces.values.contains(where: { $0 === surface }),
-              let focused = note.userInfo?["focused"] as? Bool,
+        guard let focused = note.userInfo?["focused"] as? Bool,
               focused,
-              let tabId = tabId(for: surface),
-              let sourceController = controllerContaining(tabId: tabId),
-              let sourceWorkspace = workspace(containing: sourceController),
-              let paneId = paneContaining(tabId: tabId, in: sourceController) else { return }
+              let route = surfaceRoute(for: note, requirePane: true),
+              let paneId = route.paneId else { return }
 
-        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
+        activateWorkspace(for: route)
 
-        focusedOwnedSurface = surface
+        focusedOwnedSurface = route.surface
 
-        let current = sourceController.focusedPaneId
+        let current = route.controller.focusedPaneId
         if current != paneId {
             // Set the guard before calling focusPane to prevent didFocusPane
             // from triggering another focus change.
             isChangingFocus = true
-            sourceController.focusPane(paneId)
+            route.controller.focusPane(paneId)
             isChangingFocus = false
         }
     }

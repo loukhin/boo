@@ -1556,10 +1556,14 @@ extension Ghostty {
 
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface,
-                    let surfaceView = self.surfaceView(from: surface),
-                    let controller = surfaceView.window?.windowController as? BaseTerminalController else { return }
+                      let surfaceView = self.surfaceView(from: surface),
+                      let controller = surfaceView.window?.windowController else { return }
 
-                controller.toggleBackgroundOpacity()
+                if let controller = controller as? BaseTerminalController {
+                    controller.toggleBackgroundOpacity()
+                } else if let controller = controller as? BooController {
+                    controller.toggleBackgroundOpacity()
+                }
 
             default:
                 assertionFailure()
