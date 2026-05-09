@@ -41,6 +41,11 @@ extension Ghostty {
         // we know whether to dim the surface out of focus.
         var isSplit: Bool = false
 
+        // Whether to show Ghostty's in-surface drag handle. Hosts that provide
+        // their own pane/tab dragging can disable this to avoid competing drag
+        // and focus handoff paths.
+        var showsGrabHandle: Bool = true
+
         // Maintain whether our view has focus or not
         @FocusState private var surfaceFocus: Bool
 
@@ -205,7 +210,9 @@ extension Ghostty {
                 // top Z-index os it isn't faded by the unfocused overlay.
                 //
                 // This is disabled except on macOS because it uses AppKit drag/drop APIs.
-                SurfaceGrabHandle(surfaceView: surfaceView)
+                if showsGrabHandle {
+                    SurfaceGrabHandle(surfaceView: surfaceView)
+                }
                 #endif
             }
             #if canImport(AppKit)

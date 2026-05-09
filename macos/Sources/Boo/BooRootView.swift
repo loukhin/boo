@@ -335,7 +335,11 @@ private struct BooSurfaceContainer: View {
         // the SwiftUI tap event. Boo now syncs Bonsplit pane focus from
         // `SurfaceView.focusDidChange(_:)`, i.e. from the actual NSView
         // that became first responder.
-        Ghostty.SurfaceWrapper(surfaceView: surface, isSplit: true)
+        Ghostty.SurfaceWrapper(
+            surfaceView: surface,
+            isSplit: true,
+            showsGrabHandle: false
+        )
     }
 }
 
