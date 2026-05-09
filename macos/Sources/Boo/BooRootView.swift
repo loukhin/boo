@@ -23,22 +23,49 @@ struct BooRootView: View {
                 BooWorkspaceSidebar(state: state)
             }
 
-            BonsplitView(
-                controller: state.controller,
-                // During a divider drag the SwiftUI gesture steals first-responder
-                // from whichever ghostty surface currently had it (the surface's
-                // tracking areas see the drag as a mouse event in a different
-                // view). We can't keep focus *through* the drag without deeper
-                // surface-level surgery, so we just push it back when the drag
-                // ends — same net result from the user's perspective.
-                onDividerDragEnd: { [weak state] in state?.focusCurrentTabSurface() }
-            ) { tab, paneId in
+            ZStack {
+                ForEach(state.workspaces.filter { state.isWorkspaceMounted($0.id) }) { workspace in
+                    workspaceView(workspace)
+                        .opacity(workspace.id == state.activeWorkspaceId ? 1 : 0)
+                        .allowsHitTesting(workspace.id == state.activeWorkspaceId)
+                        .accessibilityHidden(workspace.id != state.activeWorkspaceId)
+                        .zIndex(workspace.id == state.activeWorkspaceId ? 1 : 0)
+                }
+            }
+        // No outer click-to-focus gesture here. Surface clicks are handled
+        // by AppKit at the real terminal NSView level, and Boo syncs Bonsplit
+        // focus from that source-of-truth callback. Bonsplit's own delegate
+        // chain (`didSplitPane`, `didClosePane`, `didSelectTab`) handles the
+        // explicit restore paths after structural changes.
+        }
+        // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
+        // for config access (split dimming, resize overlay, etc.).
+        .environmentObject(state.ghostty)
+        .environment(\.terminalBackgroundColor, state.terminalBackgroundColor)
+        .environment(\.isWindowKey, state.isWindowKey)
+        .frame(minWidth: 600, minHeight: 400)
+    }
+
+    private func workspaceView(_ workspace: BooWorkspace) -> some View {
+        BonsplitView(
+            controller: workspace.controller,
+            // During a divider drag the SwiftUI gesture steals first-responder
+            // from whichever ghostty surface currently had it (the surface's
+            // tracking areas see the drag as a mouse event in a different
+            // view). We can't keep focus *through* the drag without deeper
+            // surface-level surgery, so we just push it back when the drag
+            // ends — same net result from the user's perspective.
+            onDividerDragEnd: { [weak state] in
+                guard state?.activeWorkspaceId == workspace.id else { return }
+                state?.focusCurrentTabSurface()
+            },
+            content: { tab, paneId in
                 // Computed here so the body re-evaluates when Bonsplit's
                 // PaneState (@Published selectedTabId) changes — that's our
                 // hook for "user clicked a tab in the tab bar", since
                 // Bonsplit's didSelectTab delegate does NOT fire for tab-bar
                 // clicks (it only fires for programmatic selection).
-                let isSelected = state.controller.selectedTab(inPane: paneId)?.id == tab.id
+                let isSelected = workspace.controller.selectedTab(inPane: paneId)?.id == tab.id
 
                 if let surface = state.surfaces[tab.id] {
                     BooSurfaceContainer(
@@ -57,18 +84,7 @@ struct BooRootView: View {
                     BooTabPlaceholder(title: tab.title)
                 }
             }
-        // No outer click-to-focus gesture here. Surface clicks are handled
-        // by AppKit at the real terminal NSView level, and Boo syncs Bonsplit
-        // focus from that source-of-truth callback. Bonsplit's own delegate
-        // chain (`didSplitPane`, `didClosePane`, `didSelectTab`) handles the
-        // explicit restore paths after structural changes.
-        }
-        // SurfaceWrapper needs the ghostty app as an @EnvironmentObject
-        // for config access (split dimming, resize overlay, etc.).
-        .environmentObject(state.ghostty)
-        .environment(\.terminalBackgroundColor, state.terminalBackgroundColor)
-        .environment(\.isWindowKey, state.isWindowKey)
-        .frame(minWidth: 600, minHeight: 400)
+        )
     }
 }
 

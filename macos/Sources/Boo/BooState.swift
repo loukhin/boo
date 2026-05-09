@@ -100,6 +100,18 @@ final class BooState: ObservableObject {
     /// narrows the terminal surface within the existing window.
     @Published private(set) var isWorkspaceSidebarVisible: Bool = false
 
+    /// Workspaces whose SwiftUI/AppKit view trees should remain mounted.
+    ///
+    /// PTYs and SurfaceViews stay alive for every workspace, but mounting every
+    /// BonsplitView forever can waste layout/compositing work. We keep a warm
+    /// set mounted so common switches and close fallbacks can focus an already
+    /// attached SurfaceView synchronously while cold workspaces are unmounted.
+    @Published private(set) var mountedWorkspaceIds: Set<WorkspaceID> = []
+
+    private let recentMountedWorkspaceLimit = 2
+    private var recentlyActiveWorkspaceIds: [WorkspaceID] = []
+    private var pendingWorkspaceActivationId: WorkspaceID?
+
     /// Flag to skip auto-focus during tab drag-out operations.
     private var isDraggingTabOut: Bool = false
 
@@ -135,7 +147,8 @@ final class BooState: ObservableObject {
         subscribeToGhosttyNotifications()
 
         // Seed one initial workspace/tab so the window isn't empty on open.
-        newWorkspace(baseConfig: baseConfig)
+        let workspaceId = createWorkspace(baseConfig: baseConfig)
+        activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
     }
 
     /// Init with an existing surface (for drag-out-to-new-window).
@@ -147,7 +160,8 @@ final class BooState: ObservableObject {
 
         // Adopt the existing surface into the initial workspace instead of
         // creating a new one.
-        newWorkspace(existingSurface: existingSurface)
+        let workspaceId = createWorkspace(existingSurface: existingSurface)
+        activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
     }
 
     private func makeWorkspaceController() -> BonsplitController {
@@ -207,36 +221,92 @@ final class BooState: ObservableObject {
 
     // MARK: - Workspace ops
 
+    private enum WorkspaceActivationReason {
+        /// Initial state seeding. The window activation callback will move focus
+        /// once SwiftUI/AppKit hosting exists.
+        case initialWindow
+
+        /// User explicitly switched workspaces via sidebar or keyboard shortcut.
+        case userSwitch
+
+        /// User created a new workspace and expects it to become active.
+        case createNew
+
+        /// The active workspace was removed and Boo selected a replacement.
+        case closeFallback
+
+        /// A Ghostty surface-scoped action requires making the source
+        /// workspace active, but the action itself will handle any focus move.
+        case surfaceAction
+
+        var shouldFocus: Bool {
+            switch self {
+            case .initialWindow, .surfaceAction:
+                return false
+            case .userSwitch, .createNew, .closeFallback:
+                return true
+            }
+        }
+    }
+
+    private struct WorkspaceActivation {
+        let id: WorkspaceID
+        let reason: WorkspaceActivationReason
+    }
+
     @discardableResult
     func newWorkspace(
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
         existingSurface: Ghostty.SurfaceView? = nil
     ) -> WorkspaceID {
-        let workspaceNumber = workspaces.count + 1
+        let workspaceId = createWorkspace(
+            baseConfig: baseConfig,
+            existingSurface: existingSurface
+        )
+        activateWorkspace(.init(id: workspaceId, reason: .createNew))
+        return workspaceId
+    }
+
+    private func createWorkspace(
+        baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        existingSurface: Ghostty.SurfaceView? = nil
+    ) -> WorkspaceID {
         let workspace = BooWorkspace(
             controller: makeWorkspaceController(),
             title: "Boo"
         )
         workspaces.append(workspace)
-        setActiveWorkspace(workspace.id, focusAfterSwitch: false)
+
+        // Establish an active workspace before creating the first tab/surface
+        // so lower-level helpers that update window chrome can resolve the
+        // current Bonsplit controller. Activation still owns focus.
+        if activeWorkspaceId == nil {
+            activeWorkspaceId = workspace.id
+            refreshMountedWorkspaces(keeping: [workspace.id])
+        }
 
         if let existingSurface {
-            adoptSurface(existingSurface, in: workspace.controller)
+            adoptSurface(existingSurface, in: workspace.controller, focusAfterCreate: false)
         } else {
-            newTab(in: workspace.controller, baseConfig: baseConfig)
+            newTab(in: workspace.controller, baseConfig: baseConfig, focusAfterCreate: false)
         }
+
         updateWindowChromeTabId()
         return workspace.id
     }
 
     func switchToWorkspace(_ id: WorkspaceID) {
-        setActiveWorkspace(id)
+        activateWorkspace(.init(id: id, reason: .userSwitch))
     }
 
     func switchToWorkspace(at index: Int) {
         guard !workspaces.isEmpty else { return }
         let clampedIndex = min(max(index, 0), workspaces.count - 1)
-        setActiveWorkspace(workspaces[clampedIndex].id)
+        activateWorkspace(.init(id: workspaces[clampedIndex].id, reason: .userSwitch))
+    }
+
+    func isWorkspaceMounted(_ id: WorkspaceID) -> Bool {
+        mountedWorkspaceIds.contains(id)
     }
 
     func workspaceDisplayTitle(_ workspace: BooWorkspace) -> String {
@@ -314,28 +384,88 @@ final class BooState: ObservableObject {
         isWorkspaceSidebarVisible.toggle()
     }
 
-    private func setActiveWorkspace(
-        _ id: WorkspaceID,
-        focusAfterSwitch: Bool = true
-    ) {
-        guard workspaces.contains(where: { $0.id == id }) else { return }
-        guard activeWorkspaceId != id else {
-            if focusAfterSwitch {
-                focusCurrentTabSurface()
-            }
+    private func activateWorkspace(_ activation: WorkspaceActivation) {
+        guard workspaces.contains(where: { $0.id == activation.id }) else { return }
+
+        let canActivateNow = activeWorkspaceId == activation.id
+            || mountedWorkspaceIds.contains(activation.id)
+            || !activation.reason.shouldFocus
+
+        if canActivateNow {
+            pendingWorkspaceActivationId = nil
+            applyWorkspaceActivation(activation)
             return
         }
 
-        unfocusAllSurfaces()
-        focusedOwnedSurface = nil
-        activeWorkspaceId = id
+        // Cold workspace: mount it hidden for one render pass, then make it
+        // active. This keeps arbitrary workspace switches and repeated
+        // Command-N creation from racing AppKit attachment while avoiding
+        // permanently mounted cold workspaces.
+        pendingWorkspaceActivationId = activation.id
+        refreshMountedWorkspaces(keeping: [activation.id])
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.pendingWorkspaceActivationId == activation.id else { return }
+            self.pendingWorkspaceActivationId = nil
+            self.applyWorkspaceActivation(activation)
+        }
+    }
+
+    private func applyWorkspaceActivation(_ activation: WorkspaceActivation) {
+        guard workspaces.contains(where: { $0.id == activation.id }) else { return }
+
+        if activeWorkspaceId != activation.id {
+            if let activeWorkspaceId {
+                recentlyActiveWorkspaceIds.removeAll { $0 == activeWorkspaceId }
+                recentlyActiveWorkspaceIds.insert(activeWorkspaceId, at: 0)
+            }
+
+            unfocusAllSurfaces()
+            focusedOwnedSurface = nil
+            activeWorkspaceId = activation.id
+        }
+
+        refreshMountedWorkspaces()
         updateWindowChromeTabId()
 
-        if focusAfterSwitch {
-            DispatchQueue.main.async { [weak self] in
-                self?.focusCurrentTabSurface()
+        if activation.reason.shouldFocus {
+            // Warm workspaces stay mounted in BooRootView, so common switches
+            // and close fallbacks can move AppKit first-responder focus
+            // immediately instead of waiting for SwiftUI to build the view.
+            focusCurrentTabSurface(reason: .workspaceActivated, immediately: true)
+        }
+    }
+
+    private func refreshMountedWorkspaces(keeping extraIds: Set<WorkspaceID> = []) {
+        let ids = workspaces.map(\.id)
+        let validIds = Set(ids)
+        recentlyActiveWorkspaceIds = recentlyActiveWorkspaceIds.filter { validIds.contains($0) }
+        if let pendingWorkspaceActivationId, !validIds.contains(pendingWorkspaceActivationId) {
+            self.pendingWorkspaceActivationId = nil
+        }
+
+        var mounted = extraIds.intersection(validIds)
+        if let pendingWorkspaceActivationId, validIds.contains(pendingWorkspaceActivationId) {
+            mounted.insert(pendingWorkspaceActivationId)
+        }
+
+        if let activeWorkspaceId,
+           let activeIndex = ids.firstIndex(of: activeWorkspaceId) {
+            mounted.insert(activeWorkspaceId)
+
+            if activeIndex > ids.startIndex {
+                mounted.insert(ids[ids.index(before: activeIndex)])
+            }
+            let nextIndex = ids.index(after: activeIndex)
+            if nextIndex < ids.endIndex {
+                mounted.insert(ids[nextIndex])
             }
         }
+
+        for id in recentlyActiveWorkspaceIds.prefix(recentMountedWorkspaceLimit) {
+            mounted.insert(id)
+        }
+
+        mountedWorkspaceIds = mounted
     }
 
     private func removeWorkspace(for controller: BonsplitController) {
@@ -345,7 +475,9 @@ final class BooState: ObservableObject {
         let removed = workspaces.remove(at: index)
         if activeWorkspaceId == removed.id {
             let newIndex = min(index, workspaces.count - 1)
-            setActiveWorkspace(workspaces[newIndex].id)
+            activateWorkspace(.init(id: workspaces[newIndex].id, reason: .closeFallback))
+        } else {
+            refreshMountedWorkspaces()
         }
     }
 
@@ -365,13 +497,34 @@ final class BooState: ObservableObject {
 
         if activeWorkspaceId == removed.id {
             let newIndex = min(index, workspaces.count - 1)
-            setActiveWorkspace(workspaces[newIndex].id)
+            activateWorkspace(.init(id: workspaces[newIndex].id, reason: .closeFallback))
         } else {
+            refreshMountedWorkspaces()
             updateWindowChromeTabId()
         }
     }
 
     // MARK: - Tab ops
+
+    private enum SurfaceSource {
+        case create(config: Ghostty.SurfaceConfiguration?)
+        case adopt(Ghostty.SurfaceView)
+
+        var initialTitle: String {
+            switch self {
+            case .create:
+                return "👻"
+            case .adopt(let surface):
+                return surface.title.isEmpty ? "👻" : surface.title
+            }
+        }
+    }
+
+    private struct CreatedSurfaceTab {
+        let tabId: TabID
+        let surface: Ghostty.SurfaceView
+        let controller: BonsplitController
+    }
 
     /// Create a new Bonsplit tab and spawn a fresh ghostty surface into it.
     /// If `paneId` is nil, the tab goes to Bonsplit's focused pane.
@@ -397,27 +550,16 @@ final class BooState: ObservableObject {
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
         focusAfterCreate: Bool = true
     ) -> TabID? {
-        guard let app = ghostty.app else { return nil }
+        guard let created = createSurfaceTab(
+            in: targetController,
+            paneId: paneId,
+            source: .create(config: baseConfig)
+        ) else { return nil }
 
-        tabCounter += 1
-
-        isCreatingBooManagedTab = true
-        let tabId = targetController.createTab(
-            title: "👻",
-            inPane: paneId
-        )
-        isCreatingBooManagedTab = false
-
-        guard let tabId else { return nil }
-
-        let surface = Ghostty.SurfaceView(app, baseConfig: baseConfig)
-        surfaces[tabId] = surface
-        observeSurface(surface, forTab: tabId)
         if focusAfterCreate {
-            focusSurface(for: tabId)
+            focusSurface(for: created.tabId, reason: .tabCreated)
         }
-        updateWindowChromeTabId()
-        return tabId
+        return created.tabId
     }
 
     /// Adopt an existing surface into a new tab (e.g., from drag-out).
@@ -443,24 +585,55 @@ final class BooState: ObservableObject {
         inPane paneId: PaneID? = nil,
         focusAfterCreate: Bool = true
     ) -> TabID? {
+        guard let created = createSurfaceTab(
+            in: targetController,
+            paneId: paneId,
+            source: .adopt(surface)
+        ) else { return nil }
+
+        if focusAfterCreate {
+            focusSurface(for: created.tabId, reason: .tabCreated)
+        }
+        return created.tabId
+    }
+
+    private func createSurfaceTab(
+        in targetController: BonsplitController,
+        paneId: PaneID? = nil,
+        source: SurfaceSource
+    ) -> CreatedSurfaceTab? {
+        let surface: Ghostty.SurfaceView
+        switch source {
+        case .create(let config):
+            guard let app = ghostty.app else { return nil }
+            surface = Ghostty.SurfaceView(app, baseConfig: config)
+        case .adopt(let existingSurface):
+            surface = existingSurface
+        }
+
         tabCounter += 1
 
         isCreatingBooManagedTab = true
         let tabId = targetController.createTab(
-            title: surface.title.isEmpty ? "👻" : surface.title,
+            title: source.initialTitle,
             inPane: paneId
         )
         isCreatingBooManagedTab = false
 
         guard let tabId else { return nil }
 
+        registerSurface(surface, forTab: tabId)
+        updateWindowChromeTabId()
+        return CreatedSurfaceTab(
+            tabId: tabId,
+            surface: surface,
+            controller: targetController
+        )
+    }
+
+    private func registerSurface(_ surface: Ghostty.SurfaceView, forTab tabId: TabID) {
         surfaces[tabId] = surface
         observeSurface(surface, forTab: tabId)
-        if focusAfterCreate {
-            focusSurface(for: tabId)
-        }
-        updateWindowChromeTabId()
-        return tabId
     }
 
     /// Mirror ghostty's live surface title into Bonsplit's tab title, and
@@ -577,7 +750,7 @@ final class BooState: ObservableObject {
               let targetController = controllerContaining(tabId: tabId),
               let workspace = workspace(containing: targetController) else { return }
 
-        setActiveWorkspace(workspace.id, focusAfterSwitch: false)
+        activateWorkspace(.init(id: workspace.id, reason: .surfaceAction))
 
         // Stash the source and config for didSplitPane to pick up when
         // it spawns the new surface.
@@ -688,7 +861,7 @@ final class BooState: ObservableObject {
         if let surface = note.object as? Ghostty.SurfaceView {
             guard let sourceController = controllerContaining(surface: surface),
                   let workspace = workspace(containing: sourceController) else { return }
-            setActiveWorkspace(workspace.id, focusAfterSwitch: false)
+            activateWorkspace(.init(id: workspace.id, reason: .surfaceAction))
             targetController = sourceController
         } else {
             guard window?.isKeyWindow == true else { return }
@@ -737,7 +910,7 @@ final class BooState: ObservableObject {
               let navDirection = Self.navigationDirection(for: direction),
               let sourcePaneId = paneContaining(tabId: tabId, in: sourceController) else { return }
 
-        setActiveWorkspace(sourceWorkspace.id, focusAfterSwitch: false)
+        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
 
         // Sync Bonsplit's focused-pane state with the actual source pane
         // before navigating. `navigateFocus` uses `focusedPaneId` as its
@@ -750,7 +923,7 @@ final class BooState: ObservableObject {
         // Bonsplit updates `focusedPaneId`, but first-responder still lives
         // on the previous surface. Push AppKit focus into the new pane's
         // selected-tab surface so typing lands in the right terminal.
-        focusCurrentTabSurface()
+        focusCurrentTabSurface(reason: .paneFocused)
     }
 
     /// Handle ⌘1–9 / ⌘⇧[ / ⌘⇧] (and config-remapped equivalents) by
@@ -767,7 +940,7 @@ final class BooState: ObservableObject {
                 as? ghostty_action_goto_tab_e,
               let paneId = paneContaining(tabId: tabId, in: sourceController) else { return }
 
-        setActiveWorkspace(sourceWorkspace.id, focusAfterSwitch: false)
+        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
 
         let tabs = sourceController.tabs(inPane: paneId)
         guard tabs.count > 1 else { return }
@@ -814,7 +987,7 @@ final class BooState: ObservableObject {
               let sourceWorkspace = workspace(containing: sourceController),
               let paneId = paneContaining(tabId: tabId, in: sourceController) else { return }
 
-        setActiveWorkspace(sourceWorkspace.id, focusAfterSwitch: false)
+        activateWorkspace(.init(id: sourceWorkspace.id, reason: .surfaceAction))
 
         focusedOwnedSurface = surface
 
@@ -1009,9 +1182,18 @@ extension BooState: BonsplitDelegate {
             // Ctrl-D), while preserving drag-out's no-refocus source-window
             // behavior.
             if controller.allPaneIds.contains(pane) {
-                focusCurrentTabSurface(inPane: pane, from: closingSurface, immediately: true)
+                focusCurrentTabSurface(
+                    inPane: pane,
+                    from: closingSurface,
+                    reason: .tabClosed,
+                    immediately: true
+                )
             } else {
-                focusCurrentTabSurface(from: closingSurface, immediately: true)
+                focusCurrentTabSurface(
+                    from: closingSurface,
+                    reason: .tabClosed,
+                    immediately: true
+                )
             }
         }
         // Note: structural recovery (epoch bump, focus) is handled by
@@ -1035,7 +1217,7 @@ extension BooState: BonsplitDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if shouldRefocus {
-                self.focusCurrentTabSurface()
+                self.focusCurrentTabSurface(reason: .paneClosed)
             }
             self.updateWindowChromeTabId()
         }
@@ -1059,13 +1241,9 @@ extension BooState: BonsplitDelegate {
         // moved an existing tab). If so, just focus it instead of creating
         // a new surface.
         let existingTabs = controller.tabs(inPane: newPane)
-        if let existingTab = existingTabs.first, let existingSurface = surfaces[existingTab.id] {
-            if let source, source !== existingSurface {
-                Ghostty.moveFocus(to: existingSurface, from: source)
-            } else {
-                Ghostty.moveFocus(to: existingSurface)
-            }
-            focusedOwnedSurface = existingSurface
+        if let existingTab = existingTabs.first,
+           surfaces[existingTab.id] != nil {
+            focusSurface(for: existingTab.id, from: source, reason: .splitCreated)
             return
         }
 
@@ -1075,15 +1253,13 @@ extension BooState: BonsplitDelegate {
         // emptied source pane — don't steal focus from the dragged tab.
         let shouldFocus = (controller.focusedPaneId == newPane)
 
-        guard let tabId = newTab(in: controller, inPane: newPane, baseConfig: cfg, focusAfterCreate: shouldFocus),
-              let newSurface = surfaces[tabId] else {
+        guard let tabId = newTab(in: controller, inPane: newPane, baseConfig: cfg, focusAfterCreate: false) else {
             return
         }
 
         // Move AppKit first responder to the new surface only if it should focus.
-        if shouldFocus, let source, source !== newSurface {
-            Ghostty.moveFocus(to: newSurface, from: source)
-            focusedOwnedSurface = newSurface
+        if shouldFocus {
+            focusSurface(for: tabId, from: source, reason: .splitCreated)
         }
     }
 
@@ -1105,9 +1281,8 @@ extension BooState: BonsplitDelegate {
 
         // Create a new surface for this tab
         let surface = Ghostty.SurfaceView(app, baseConfig: nil, uuid: tab.id.id)
-        surfaces[tab.id] = surface
-        observeSurface(surface, forTab: tab.id)
-        focusSurface(for: tab.id)
+        registerSurface(surface, forTab: tab.id)
+        focusSurface(for: tab.id, reason: .tabCreated)
         updateWindowChromeTabId()
     }
 
@@ -1126,7 +1301,7 @@ extension BooState: BonsplitDelegate {
             guard let self else { return }
             // Skip focus if this was triggered by drag-out (focus goes to new window).
             if !wasDraggingOut {
-                self.focusSurface(for: tab.id)
+                self.focusSurface(for: tab.id, reason: .tabSelected)
             }
             self.updateWindowChromeTabId()
         }
@@ -1146,13 +1321,28 @@ extension BooState: BonsplitDelegate {
         // This handles the case where the user clicks an already-selected
         // tab in another pane: didSelectTab doesn't fire (tab was already
         // selected), but we still need to move first-responder.
-        focusCurrentTabSurface()
+        focusCurrentTabSurface(reason: .paneFocused)
+    }
+
+    // MARK: - Focus coordination
+
+    enum TerminalFocusReason {
+        case workspaceActivated
+        case tabCreated
+        case tabSelected
+        case tabClosed
+        case paneClosed
+        case paneFocused
+        case splitCreated
+        case windowActivated
+        case explicit
     }
 
     /// Move AppKit first-responder focus to this tab's surface.
     private func focusSurface(
         for tabId: TabID,
         from source: Ghostty.SurfaceView? = nil,
+        reason: TerminalFocusReason = .explicit,
         immediately: Bool = false
     ) {
         guard let surface = surfaces[tabId] else { return }
@@ -1160,9 +1350,14 @@ extension BooState: BonsplitDelegate {
         if let targetController = controllerContaining(tabId: tabId),
            let workspace = workspace(containing: targetController),
            activeWorkspaceId != workspace.id {
-            setActiveWorkspace(workspace.id, focusAfterSwitch: false)
+            activateWorkspace(.init(id: workspace.id, reason: .userSwitch))
             DispatchQueue.main.async { [weak self, source] in
-                self?.focusSurface(for: tabId, from: source, immediately: immediately)
+                self?.focusSurface(
+                    for: tabId,
+                    from: source,
+                    reason: reason,
+                    immediately: immediately
+                )
             }
             return
         }
@@ -1212,19 +1407,31 @@ extension BooState: BonsplitDelegate {
     /// restores terminal focus without requiring a click.
     func focusCurrentTabSurface(
         from source: Ghostty.SurfaceView? = nil,
+        reason: TerminalFocusReason = .explicit,
         immediately: Bool = false
     ) {
         guard let paneId = controller.focusedPaneId else { return }
-        focusCurrentTabSurface(inPane: paneId, from: source, immediately: immediately)
+        focusCurrentTabSurface(
+            inPane: paneId,
+            from: source,
+            reason: reason,
+            immediately: immediately
+        )
     }
 
     func focusCurrentTabSurface(
         inPane paneId: PaneID,
         from source: Ghostty.SurfaceView? = nil,
+        reason: TerminalFocusReason = .explicit,
         immediately: Bool = false
     ) {
         guard let tab = controller.selectedTab(inPane: paneId) else { return }
-        focusSurface(for: tab.id, from: source, immediately: immediately)
+        focusSurface(
+            for: tab.id,
+            from: source,
+            reason: reason,
+            immediately: immediately
+        )
     }
 
     /// Unfocus all surfaces when the window loses key status.
@@ -1249,12 +1456,12 @@ extension BooState: BonsplitDelegate {
             if surface.window?.isKeyWindow == true,
                surface.window?.firstResponder === surface {
                 surface.focusDidChange(true)
-            } else {
-                Ghostty.moveFocus(to: surface)
+            } else if let tabId = tabId(for: surface) {
+                focusSurface(for: tabId, reason: .windowActivated)
             }
         } else {
             focusedOwnedSurface = nil
-            focusCurrentTabSurface()
+            focusCurrentTabSurface(reason: .windowActivated)
         }
     }
 
@@ -1363,7 +1570,7 @@ extension BooState: BonsplitDelegate {
             controller.focusPane(panes[nextIndex])
         }
         // Focus the surface in the newly focused pane
-        focusCurrentTabSurface()
+        focusCurrentTabSurface(reason: .paneFocused)
     }
 }
 

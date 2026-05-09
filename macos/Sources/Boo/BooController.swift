@@ -34,8 +34,15 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         let c = BooController(ghostty: ghostty, baseConfig: baseConfig)
         c.showWindow(nil)
         if let window = c.window, !window.styleMask.contains(.fullScreen) {
-            let initialContentSize = c.initialBooContentSize(fallbackToCurrentSurfaceSize: false)
-            applyCascade(to: window, initialContentSize: initialContentSize)
+            let initialContentSize = BooWindowSizing.initialContentSize(
+                from: c.state,
+                fallbackToCurrentSurfaceSize: false
+            )
+            BooWindowSizing.applyCascade(
+                to: window,
+                initialContentSize: initialContentSize,
+                windowCount: all.count
+            )
             if initialContentSize == nil {
                 c.retryApplyInitialBooContentSize()
             }
@@ -53,40 +60,15 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         let c = BooController(ghostty: ghostty, existingSurface: surface)
         c.showWindow(nil)
         if let window = c.window, !window.styleMask.contains(.fullScreen),
-           let initialContentSize = c.initialBooContentSize(fallbackToCurrentSurfaceSize: true) {
+           let initialContentSize = BooWindowSizing.initialContentSize(
+               from: c.state,
+               fallbackToCurrentSurfaceSize: true
+           ) {
             window.setContentSize(initialContentSize)
             window.constrainToScreen()
         }
         if let position, let window = c.window {
-            // Position window so the drop point is at the center of the window
-            let windowSize = window.frame.size
-            let origin = NSPoint(
-                x: position.x - windowSize.width / 2,
-                y: position.y - windowSize.height / 2
-            )
-            window.setFrameOrigin(origin)
-
-            // Constrain to screen bounds
-            if let screen = NSScreen.screens.first(where: { $0.frame.contains(position) }) ?? NSScreen.main {
-                var frame = window.frame
-                let visibleFrame = screen.visibleFrame
-
-                // Ensure window fits within screen
-                if frame.maxX > visibleFrame.maxX {
-                    frame.origin.x = visibleFrame.maxX - frame.width
-                }
-                if frame.minX < visibleFrame.minX {
-                    frame.origin.x = visibleFrame.minX
-                }
-                if frame.maxY > visibleFrame.maxY {
-                    frame.origin.y = visibleFrame.maxY - frame.height
-                }
-                if frame.minY < visibleFrame.minY {
-                    frame.origin.y = visibleFrame.minY
-                }
-
-                window.setFrame(frame, display: true)
-            }
+            BooWindowSizing.centerWindow(window, at: position)
 
             // Make the new window key so the old window properly resigns
             window.makeKeyAndOrderFront(nil)
@@ -145,57 +127,6 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         configureWindow()
     }
 
-    // Track cascade point for positioning new windows, like Ghostty does.
-    private static var lastCascadePoint = NSPoint(x: 0, y: 0)
-
-    private static func applyCascade(to window: NSWindow, initialContentSize: NSSize? = nil) {
-        // Apply initial size from ghostty config if provided. In Boo, the
-        // config size means terminal surface size; we add fixed Bonsplit
-        // chrome before getting here but intentionally exclude sidebar width.
-        if let size = initialContentSize {
-            window.setContentSize(size)
-            window.constrainToScreen()
-        }
-
-        if all.count > 1 {
-            // Cascade from last cascade point (matches Ghostty behavior).
-            lastCascadePoint = window.cascadeTopLeft(from: lastCascadePoint)
-        } else {
-            // First window: try to restore saved position, otherwise center.
-            // If config supplied a size, don't restore the previous size over
-            // it; matching Ghostty, config/default size wins over saved size.
-            let restored: Bool
-            if initialContentSize == nil {
-                restored = window.setFrameUsingName("BooWindow")
-            } else {
-                restored = restoreFrameOriginOnly(for: window, autosaveName: "BooWindow")
-            }
-            if !restored {
-                window.center()
-            }
-            // Get cascade point. For restored windows, save frame first since
-            // cascadeTopLeft(from: .zero) might move it on some macOS versions.
-            let savedFrame = window.frame
-            lastCascadePoint = window.cascadeTopLeft(from: .zero)
-            if restored && window.frame != savedFrame {
-                window.setFrame(savedFrame, display: true)
-            }
-        }
-    }
-
-    private func initialBooContentSize(fallbackToCurrentSurfaceSize: Bool) -> NSSize? {
-        guard let surface = state.surfaces.values.first else { return nil }
-
-        if let initialSize = surface.initialSize {
-            return Self.booContentSize(forTerminalSurfaceSize: initialSize)
-        }
-
-        guard fallbackToCurrentSurfaceSize,
-              surface.frame.width > 0,
-              surface.frame.height > 0 else { return nil }
-        return Self.booContentSize(forTerminalSurfaceSize: surface.frame.size)
-    }
-
     private func retryApplyInitialBooContentSize(attempt: Int = 0) {
         guard attempt < 5,
               let window,
@@ -203,29 +134,16 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak window] in
             guard let self, let window else { return }
-            if let size = self.initialBooContentSize(fallbackToCurrentSurfaceSize: false) {
+            if let size = BooWindowSizing.initialContentSize(
+                from: self.state,
+                fallbackToCurrentSurfaceSize: false
+            ) {
                 window.setContentSize(size)
                 window.constrainToScreen()
             } else {
                 self.retryApplyInitialBooContentSize(attempt: attempt + 1)
             }
         }
-    }
-
-    private static func booContentSize(forTerminalSurfaceSize size: NSSize) -> NSSize {
-        NSSize(
-            width: size.width,
-            height: size.height + TabBarMetrics.barHeight
-        )
-    }
-
-    private static func restoreFrameOriginOnly(for window: NSWindow, autosaveName: String) -> Bool {
-        let size = window.frame.size
-        guard window.setFrameUsingName(autosaveName) else { return false }
-        var frame = window.frame
-        frame.size = size
-        window.setFrame(frame, display: true)
-        return true
     }
 
     private static func makeWindow() -> NSWindow {
@@ -1014,21 +932,7 @@ extension BooController: NSWindowDelegate {
 
         // Update cascade point like Ghostty does so the next window
         // cascades from the remaining key window.
-        if let focusedWindow = NSApplication.shared.keyWindow {
-            if focusedWindow != window {
-                // Closing a non-key window: cascade from the key window.
-                // Save and restore frame to avoid macOS 15 window snapping issues.
-                let oldFrame = focusedWindow.frame
-                Self.lastCascadePoint = focusedWindow.cascadeTopLeft(from: .zero)
-                if focusedWindow.frame != oldFrame {
-                    focusedWindow.setFrame(oldFrame, display: true)
-                }
-            } else {
-                // Closing the key window: use its position for next window.
-                let frame = focusedWindow.frame
-                Self.lastCascadePoint = NSPoint(x: frame.minX, y: frame.maxY)
-            }
-        }
+        BooWindowSizing.updateCascadePoint(closing: window)
     }
 
     /// When the window becomes key, refocus the current surface so the
