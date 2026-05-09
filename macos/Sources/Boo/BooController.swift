@@ -309,6 +309,22 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             object: nil
         )
 
+        // App activation can preserve the same key window/first responder,
+        // so NSWindow.didBecomeKey is not always enough to restore terminal
+        // cursor visuals after we marked surfaces unfocused on deactivate.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive(_:)),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidResignActive(_:)),
+            name: NSApplication.didResignActiveNotification,
+            object: nil
+        )
+
         // Listen for fullscreen toggle from keybindings
         NotificationCenter.default.addObserver(
             self,
@@ -409,6 +425,18 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         for controller in BooController.all {
             controller.window?.saveFrame(usingName: "BooWindow")
         }
+    }
+
+    @objc private func applicationDidBecomeActive(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        state.setWindowKey(true)
+        state.refocusCurrentSurface()
+    }
+
+    @objc private func applicationDidResignActive(_ notification: Notification) {
+        guard window?.isKeyWindow == true else { return }
+        state.setWindowKey(false)
+        state.unfocusAllSurfaces()
     }
 
     private func handleBooKeyDown(_ event: NSEvent) -> Bool {
@@ -988,6 +1016,11 @@ extension BooController: NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         state.setWindowKey(false)
         state.unfocusAllSurfaces()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        state.setWindowKey(window?.isKeyWindow == true)
+        state.refocusCurrentSurface()
     }
 }
 

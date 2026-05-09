@@ -1173,6 +1173,13 @@ extension BooState: BonsplitDelegate {
         // our tracking.
         let isActualFirstResponder = surface.window?.firstResponder === surface
         if focusedOwnedSurface === surface && isActualFirstResponder {
+            // The AppKit first responder can survive a window/app deactivate
+            // while Boo has marked the surface unfocused for cursor visuals.
+            // Restore the surface focus state when no responder handoff is
+            // needed so the cursor becomes filled again.
+            if surface.window?.isKeyWindow == true {
+                surface.focusDidChange(true)
+            }
             return
         }
         
@@ -1188,6 +1195,9 @@ extension BooState: BonsplitDelegate {
                 previous.focusDidChange(false)
             }
             window.makeFirstResponder(surface)
+            if window.isKeyWindow {
+                surface.focusDidChange(true)
+            }
         } else if let previous, previous !== surface {
             Ghostty.moveFocus(to: surface, from: previous)
         } else {
@@ -1236,7 +1246,12 @@ extension BooState: BonsplitDelegate {
     func refocusCurrentSurface() {
         if let surface = focusedOwnedSurface,
            surfaces.values.contains(where: { $0 === surface }) {
-            Ghostty.moveFocus(to: surface)
+            if surface.window?.isKeyWindow == true,
+               surface.window?.firstResponder === surface {
+                surface.focusDidChange(true)
+            } else {
+                Ghostty.moveFocus(to: surface)
+            }
         } else {
             focusedOwnedSurface = nil
             focusCurrentTabSurface()
