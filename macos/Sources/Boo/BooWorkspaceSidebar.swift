@@ -102,7 +102,7 @@ struct BooWorkspaceSidebar: View {
                 Text(state.workspaceDisplayTitle(workspace))
                     .font(.system(size: TabBarMetrics.titleFontSize))
                     .lineLimit(1)
-                    .truncationMode(.head)
+                    .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(workspaceRowTextColor(for: workspace))
 
