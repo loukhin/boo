@@ -3,20 +3,13 @@ import Cocoa
 
 extension UpdateDriver: SPUUpdaterDelegate {
     func feedURLString(for updater: SPUUpdater) -> String? {
-        // Boo does not have its own appcast yet. Returning nil makes Sparkle
-        // no-op any check (automatic or menu-driven) instead of phoning home
-        // to ghostty's servers and offering to replace Boo.app with a signed
-        // Ghostty.app release.
-        //
-        // Restore channel-based URL selection once a Boo-owned appcast is
-        // published (see `dist/macos/RELEASE.md` for the signing flow). The
-        // original ghostty routing looked like:
-        //
-        //     switch appDelegate.ghostty.config.autoUpdateChannel {
-        //     case .tip:    return "https://tip.files.ghostty.org/appcast.xml"
-        //     case .stable: return "https://release.files.ghostty.org/appcast.xml"
-        //     }
-        return nil
+        guard let appDelegate = NSApp.delegate as? AppDelegate else { return nil }
+
+        switch appDelegate.ghostty.config.autoUpdateChannel {
+        case .tip:    return "https://tip.files.boo.lop.town/appcast.xml"
+        // case .stable: return "https://release.files.boo.lop.town/appcast.xml"
+        default: return nil
+        }
     }
 
     /// Called when an update is scheduled to install silently,

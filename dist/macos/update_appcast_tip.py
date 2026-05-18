@@ -9,8 +9,8 @@ This expects the following files in the current directory:
     - appcast.xml - the existing appcast file.
 
 And the following environment variables to be set:
-    - GHOSTTY_BUILD - the build number
-    - GHOSTTY_COMMIT - the commit hash
+    - BOO_BUILD - the build number
+    - BOO_COMMIT - the commit hash
 
 The script will output a new appcast file called appcast_new.xml.
 """
@@ -20,10 +20,10 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 now = datetime.now(timezone.utc)
-build = os.environ["GHOSTTY_BUILD"]
-commit = os.environ["GHOSTTY_COMMIT"]
-commit_long = os.environ["GHOSTTY_COMMIT_LONG"]
-repo = "https://github.com/ghostty-org/ghostty"
+build = os.environ["BOO_BUILD"]
+commit = os.environ["BOO_COMMIT"]
+commit_long = os.environ["BOO_COMMIT_LONG"]
+repo = "https://github.com/loukhin/boo"
 
 # Read our sign_update output
 with open("sign_update.txt", "r") as f:
@@ -94,7 +94,7 @@ commit history <a href="{repo}">on GitHub</a> for all changes.
 </p>
 """
 elem = ET.SubElement(item, "enclosure")
-elem.set("url", f"https://tip.files.ghostty.org/{commit_long}/Ghostty.dmg")
+elem.set("url", f"https://tip.files.boo.lop.town/{commit_long}/Boo.dmg")
 elem.set("type", "application/octet-stream")
 for key, value in attrs.items():
     elem.set(key, value)

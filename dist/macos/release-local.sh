@@ -74,14 +74,6 @@ PLIST="${APP_PATH}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BUILD_COMMIT}" "${PLIST}" || true
 /usr/libexec/PlistBuddy -c "Set :BooCommit ${BUILD_COMMIT}" "${PLIST}" || true
 
-if [[ -n "${BOO_SPARKLE_PUB:-}" ]]; then
-  # SUPublicEDKey is intentionally absent from the committed Info.plist
-  # (Boo doesn't ship ghostty's key). Try Set first for the (rare) case
-  # where the plist already carries the key, then fall back to Add.
-  /usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${BOO_SPARKLE_PUB}" "${PLIST}" 2>/dev/null || \
-  /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${BOO_SPARKLE_PUB}" "${PLIST}"
-fi
-
 # --- 4. codesign ----------------------------------------------------------
 
 echo ">> [4/7] codesign (hardened runtime)"
