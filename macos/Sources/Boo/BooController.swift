@@ -184,6 +184,17 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             accessory.view.translatesAutoresizingMaskIntoConstraints = false
         }
 
+        if window.styleMask.contains(.titled),
+           let appDelegate = NSApp.delegate as? AppDelegate {
+            let accessory = NSTitlebarAccessoryViewController()
+            accessory.layoutAttribute = .right
+            accessory.view = NonDraggableHostingView(
+                rootView: BooUpdateAccessoryView(model: appDelegate.updateViewModel)
+            )
+            window.addTitlebarAccessoryViewController(accessory)
+            accessory.view.translatesAutoresizingMaskIntoConstraints = false
+        }
+
         // In non-release builds, install a right-aligned titlebar pill so
         // the "this is a debug build" signal is present without stealing a
         // row of terminal content. Same gate the old inline banner used.
@@ -1011,6 +1022,22 @@ extension BooController: NSWindowDelegate {
 
     func windowDidExitFullScreen(_ notification: Notification) {
         applyWindowTheme()
+    }
+}
+
+/// Applies the same top/trailing padding Ghostty uses for its right-aligned
+/// update titlebar accessory.
+private struct BooUpdateAccessoryView: View {
+    @ObservedObject var model: UpdateViewModel
+
+    private var topPadding: CGFloat {
+        if #available(macOS 26.0, *) { 5 } else { 4 }
+    }
+
+    var body: some View {
+        UpdatePill(model: model)
+            .padding(.top, topPadding)
+            .padding(.trailing, topPadding)
     }
 }
 
