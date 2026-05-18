@@ -308,6 +308,19 @@ final class BooState: ObservableObject {
         activateWorkspace(.init(id: workspaces[clampedIndex].id, reason: .userSwitch))
     }
 
+    func moveWorkspace(_ sourceId: WorkspaceID, toIndex destinationIndex: Int) {
+        guard let sourceIndex = workspaces.firstIndex(where: { $0.id == sourceId }) else { return }
+
+        let clampedDestinationIndex = min(max(destinationIndex, 0), workspaces.count)
+        guard sourceIndex != clampedDestinationIndex,
+              sourceIndex + 1 != clampedDestinationIndex else { return }
+
+        workspaces.move(
+            fromOffsets: IndexSet(integer: sourceIndex),
+            toOffset: clampedDestinationIndex
+        )
+    }
+
     func isWorkspaceMounted(_ id: WorkspaceID) -> Bool {
         mountedWorkspaceIds.contains(id)
     }

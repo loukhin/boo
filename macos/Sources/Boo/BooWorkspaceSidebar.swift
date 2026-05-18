@@ -1,10 +1,13 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct BooWorkspaceSidebar: View {
     @ObservedObject var state: BooState
     @State private var hoveredWorkspaceId: WorkspaceID?
     @State private var hoveredCloseWorkspaceId: WorkspaceID?
+    @State private var draggedWorkspaceId: WorkspaceID?
+    @State private var dropTargetIndex: Int?
     @State private var scrollOffset: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
     @State private var viewportHeight: CGFloat = 0
@@ -25,12 +28,41 @@ struct BooWorkspaceSidebar: View {
                         BooSidebarWindowDragZoneView()
                             .frame(maxWidth: .infinity)
                             .frame(minHeight: geometry.size.height)
+                            .onDrop(of: [.booWorkspace], delegate: BooWorkspaceDropDelegate(
+                                targetIndex: state.workspaces.count,
+                                state: state,
+                                draggedWorkspaceId: $draggedWorkspaceId,
+                                dropTargetIndex: $dropTargetIndex
+                            ))
 
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(state.workspaces) { workspace in
+                            ForEach(Array(state.workspaces.enumerated()), id: \.element.id) { index, workspace in
                                 workspaceRow(workspace: workspace)
                                     .id(workspace.id)
+                                    .onDrag {
+                                        createWorkspaceItemProvider(for: workspace)
+                                    } preview: {
+                                        workspaceRow(workspace: workspace)
+                                            .frame(width: 172)
+                                            .background(
+                                                state.terminalChromeBackgroundColor.opacity(0.95),
+                                                in: RoundedRectangle(cornerRadius: 6)
+                                            )
+                                    }
+                                    .onDrop(of: [.booWorkspace], delegate: BooWorkspaceDropDelegate(
+                                        targetIndex: index,
+                                        state: state,
+                                        draggedWorkspaceId: $draggedWorkspaceId,
+                                        dropTargetIndex: $dropTargetIndex
+                                    ))
+                                    .overlay(alignment: .top) {
+                                        if dropTargetIndex == index {
+                                            workspaceDropIndicator
+                                        }
+                                    }
                             }
+
+                            workspaceEndDropZone
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 4)
@@ -94,6 +126,52 @@ struct BooWorkspaceSidebar: View {
             LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
                 .frame(height: canScrollDown ? fadeHeight : 0)
         }
+    }
+
+    @ViewBuilder
+    private var workspaceDropIndicator: some View {
+        ZStack {
+            Capsule()
+                .fill(state.terminalChromeBackgroundColor)
+                .frame(height: TabBarMetrics.dropIndicatorWidth + 3)
+
+            Capsule()
+                .fill(TabBarColors.dropIndicator)
+                .frame(height: TabBarMetrics.dropIndicatorWidth + 1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 4)
+        .offset(y: -(TabBarMetrics.dropIndicatorWidth + 3) / 2)
+        .zIndex(1)
+    }
+
+    @ViewBuilder
+    private var workspaceEndDropZone: some View {
+        Color.clear
+            .frame(height: 14)
+            .onDrop(of: [.booWorkspace], delegate: BooWorkspaceDropDelegate(
+                targetIndex: state.workspaces.count,
+                state: state,
+                draggedWorkspaceId: $draggedWorkspaceId,
+                dropTargetIndex: $dropTargetIndex
+            ))
+            .overlay(alignment: .top) {
+                if dropTargetIndex == state.workspaces.count {
+                    workspaceDropIndicator
+                }
+            }
+    }
+
+    private func createWorkspaceItemProvider(for workspace: BooWorkspace) -> NSItemProvider {
+        draggedWorkspaceId = workspace.id
+
+        let data = workspace.id.id.uuidString.data(using: .utf8) ?? Data()
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.booWorkspace.identifier, visibility: .ownProcess) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
 
     private func workspaceRow(workspace: BooWorkspace) -> some View {
@@ -215,6 +293,57 @@ struct BooWorkspaceSidebar: View {
         } else {
             scroll()
         }
+    }
+}
+
+private extension UTType {
+    static let booWorkspace: UTType = {
+        UTType(tag: "boo-workspace", tagClass: .filenameExtension, conformingTo: .data)!
+    }()
+}
+
+private struct BooWorkspaceDropDelegate: DropDelegate {
+    let targetIndex: Int
+    let state: BooState
+    @Binding var draggedWorkspaceId: WorkspaceID?
+    @Binding var dropTargetIndex: Int?
+
+    private var isNoOpTarget: Bool {
+        guard let draggedWorkspaceId,
+              let sourceIndex = state.workspaces.firstIndex(where: { $0.id == draggedWorkspaceId }) else { return true }
+
+        return sourceIndex == targetIndex || sourceIndex + 1 == targetIndex
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggedWorkspaceId = nil
+            dropTargetIndex = nil
+        }
+
+        guard let draggedWorkspaceId else { return false }
+        withAnimation(.spring(duration: TabBarMetrics.reorderDuration, bounce: TabBarMetrics.reorderBounce)) {
+            state.moveWorkspace(draggedWorkspaceId, toIndex: targetIndex)
+        }
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        dropTargetIndex = isNoOpTarget ? nil : targetIndex
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropTargetIndex == targetIndex {
+            dropTargetIndex = nil
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedWorkspaceId != nil && !isNoOpTarget && info.hasItemsConforming(to: [.booWorkspace])
     }
 }
 
