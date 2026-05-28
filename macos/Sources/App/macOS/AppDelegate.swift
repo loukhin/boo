@@ -986,6 +986,7 @@ class AppDelegate: NSObject,
 
     @IBAction func closeAllWindows(_ sender: Any?) {
         TerminalController.closeAllWindows()
+        BooController.closeAllWindows()
         AboutController.shared.hide()
     }
 
@@ -1037,12 +1038,22 @@ class AppDelegate: NSObject,
         NSApplication.shared.arrangeInFront(sender)
     }
 
+    private var activeMenuUndoManager: UndoManager {
+        if let responderUndoManager = NSApp.keyWindow?.firstResponder?.undoManager,
+           responderUndoManager !== undoManager,
+           responderUndoManager.canUndo || responderUndoManager.canRedo {
+            return responderUndoManager
+        }
+
+        return undoManager
+    }
+
     @IBAction func undo(_ sender: Any?) {
-        undoManager.undo()
+        activeMenuUndoManager.undo()
     }
 
     @IBAction func redo(_ sender: Any?) {
-        undoManager.redo()
+        activeMenuUndoManager.redo()
     }
 
     private struct DerivedConfig {
@@ -1142,6 +1153,10 @@ extension AppDelegate {
         // Note: This COULD Be done all in the xib file, but I find it easier to
         // modify this stuff as code.
         installBooWorkspaceMenuItem()
+        self.menuUndo?.target = self
+        self.menuUndo?.action = #selector(undo(_:))
+        self.menuRedo?.target = self
+        self.menuRedo?.action = #selector(redo(_:))
         self.menuAbout?.setImageIfDesired(systemSymbolName: "info.circle")
         self.menuCheckForUpdates?.setImageIfDesired(systemSymbolName: "square.and.arrow.down")
         self.menuOpenConfig?.setImageIfDesired(systemSymbolName: "gear")
@@ -1335,20 +1350,22 @@ extension AppDelegate: NSMenuItemValidation {
                    NSApp.keyWindow?.windowController is BooController
 
         case #selector(undo(_:)):
-            if undoManager.canUndo {
-                item.title = "Undo \(undoManager.undoActionName)"
+            let manager = activeMenuUndoManager
+            if manager.canUndo {
+                item.title = "Undo \(manager.undoActionName)"
             } else {
                 item.title = "Undo"
             }
-            return undoManager.canUndo
+            return manager.canUndo
 
         case #selector(redo(_:)):
-            if undoManager.canRedo {
-                item.title = "Redo \(undoManager.redoActionName)"
+            let manager = activeMenuUndoManager
+            if manager.canRedo {
+                item.title = "Redo \(manager.redoActionName)"
             } else {
                 item.title = "Redo"
             }
-            return undoManager.canRedo
+            return manager.canRedo
 
         default:
             return true

@@ -126,6 +126,17 @@ final class BooState: ObservableObject {
     /// `confirmedCloseTabIds` for `shouldClosePane`.
     private var confirmedClosePaneIds: Set<PaneID> = []
 
+    /// Tab ids captured immediately before a whole pane is closed. Bonsplit's
+    /// pane-close callback only reports the pane id after the pane is gone, so
+    /// Boo records the pane's tabs here in order to release the matching
+    /// surfaces and to snapshot undo/redo state correctly.
+    private var closingPaneTabIds: [PaneID: [TabID]] = [:]
+
+    /// Pending pre-mutation snapshot for tabs created directly by Bonsplit UI
+    /// (for example the + button in a tab bar). Boo-managed tab creation wraps
+    /// its own mutation and does not use this hook.
+    private var pendingBonsplitCreateTabUndoState: BooRestorableState?
+
     /// Whether a close confirmation alert is currently on screen. Blocks
     /// issuing a second alert for a concurrent close attempt (e.g. holding
     /// ⌘W or clicking multiple X buttons).
@@ -211,6 +222,19 @@ final class BooState: ObservableObject {
         let totalTabs = sourceController.allPaneIds.reduce(0) { $0 + sourceController.tabs(inPane: $1).count }
         guard totalTabs > 1 else { return }
 
+        let shouldRegisterUndo = undoManager?.isUndoRegistrationEnabled == true
+        let before = shouldRegisterUndo ? BooRestorableState(from: self) : nil
+        if shouldRegisterUndo {
+            undoManager?.beginUndoGrouping()
+            undoManager?.setActionName("Move Tab to New Window")
+        }
+        defer {
+            if shouldRegisterUndo {
+                undoManager?.setActionName("Move Tab to New Window")
+                undoManager?.endUndoGrouping()
+            }
+        }
+
         // Set flag to skip auto-focus in didCloseTab
         isDraggingTabOut = true
         defer { isDraggingTabOut = false }
@@ -225,6 +249,11 @@ final class BooState: ObservableObject {
         surfaceSubscriptions.removeValue(forKey: tab.id)
         sourceController.closeTab(tab.id)
 
+        if let before {
+            let after = BooRestorableState(from: self)
+            registerSnapshotUndo("Move Tab to New Window", undoState: before, redoState: after)
+        }
+
         // Unfocus all surfaces in this window
         unfocusAllSurfaces()
 
@@ -234,6 +263,96 @@ final class BooState: ObservableObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Undo / Redo
+
+    private var undoManager: ExpiringUndoManager? {
+        if let result = window?.undoManager as? ExpiringUndoManager {
+            return result
+        }
+
+        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return nil }
+        return appDelegate.undoManager
+    }
+
+    private var undoExpiration: Duration {
+        ghostty.config.undoTimeout
+    }
+
+    private func performUndoableStateChange(
+        _ actionName: String,
+        _ mutation: () -> Void
+    ) {
+        guard let undoManager, undoManager.isUndoRegistrationEnabled else {
+            mutation()
+            return
+        }
+
+        let before = BooRestorableState(from: self)
+        mutation()
+        let after = BooRestorableState(from: self)
+        registerSnapshotUndo(actionName, undoState: before, redoState: after)
+    }
+
+    private func registerSnapshotUndo(
+        _ actionName: String,
+        undoState: BooRestorableState,
+        redoState: BooRestorableState
+    ) {
+        guard let undoManager else { return }
+        undoManager.setActionName(actionName)
+        undoManager.registerUndo(
+            withTarget: self,
+            expiresAfter: undoExpiration
+        ) { target in
+            target.restoreSnapshot(undoState)
+            target.registerSnapshotUndo(
+                actionName,
+                undoState: redoState,
+                redoState: undoState
+            )
+        }
+    }
+
+    private func registerPendingBonsplitCreateTabUndoIfNeeded() {
+        guard let before = pendingBonsplitCreateTabUndoState else { return }
+        pendingBonsplitCreateTabUndoState = nil
+        let after = BooRestorableState(from: self)
+        registerSnapshotUndo("New Tab", undoState: before, redoState: after)
+    }
+
+    func restoreSnapshot(_ snapshot: BooRestorableState) {
+        objectWillChange.send()
+
+        for surface in surfaces.values {
+            surface.focusDidChange(false)
+            surface.cachedScrollView = nil
+        }
+
+        workspaces.removeAll()
+        activeWorkspaceId = nil
+        surfaces.removeAll()
+        surfaceSubscriptions.removeAll()
+        windowChromeTabId = nil
+        windowChromeTitle = "Boo"
+        windowChromeURL = nil
+        focusedOwnedSurface = nil
+        isChangingFocus = false
+        mountedWorkspaceIds.removeAll()
+        isWorkspaceSidebarVisible = false
+        isDraggingTabOut = false
+        confirmedCloseTabIds.removeAll()
+        confirmedClosePaneIds.removeAll()
+        closingPaneTabIds.removeAll()
+        pendingBonsplitCreateTabUndoState = nil
+        pendingSplitConfig = nil
+        pendingSplitSource = nil
+
+        restore(from: snapshot)
+        syncWindowChromeToWindow()
+        restoreFocus(toSurfaceWithId: snapshot.focusedSurfaceId)
+        objectWillChange.send()
     }
 
     // MARK: - Restoration
@@ -333,12 +452,20 @@ final class BooState: ObservableObject {
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
         existingSurface: Ghostty.SurfaceView? = nil
     ) -> WorkspaceID {
-        let workspaceId = createWorkspace(
-            baseConfig: baseConfig,
-            existingSurface: existingSurface
-        )
-        activateWorkspace(.init(id: workspaceId, reason: .createNew))
-        return workspaceId
+        var createdWorkspaceId: WorkspaceID?
+        performUndoableStateChange("New Workspace") {
+            let workspaceId = createWorkspace(
+                baseConfig: baseConfig,
+                existingSurface: existingSurface
+            )
+            activateWorkspace(.init(id: workspaceId, reason: .createNew))
+            createdWorkspaceId = workspaceId
+        }
+
+        guard let createdWorkspaceId else {
+            preconditionFailure("New workspace mutation did not create a workspace")
+        }
+        return createdWorkspaceId
     }
 
     private func createWorkspace(
@@ -386,10 +513,12 @@ final class BooState: ObservableObject {
         guard sourceIndex != clampedDestinationIndex,
               sourceIndex + 1 != clampedDestinationIndex else { return }
 
-        workspaces.move(
-            fromOffsets: IndexSet(integer: sourceIndex),
-            toOffset: clampedDestinationIndex
-        )
+        performUndoableStateChange("Move Workspace") {
+            workspaces.move(
+                fromOffsets: IndexSet(integer: sourceIndex),
+                toOffset: clampedDestinationIndex
+            )
+        }
     }
 
     func isWorkspaceMounted(_ id: WorkspaceID) -> Bool {
@@ -445,8 +574,13 @@ final class BooState: ObservableObject {
         let applyRename = { [weak self, weak textField] in
             guard let self, let textField else { return }
             let title = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.objectWillChange.send()
-            workspace.customTitle = title.isEmpty ? nil : title
+            let newTitle = title.isEmpty ? nil : title
+            guard workspace.customTitle != newTitle else { return }
+
+            self.performUndoableStateChange("Rename Workspace") {
+                self.objectWillChange.send()
+                workspace.customTitle = newTitle
+            }
         }
 
         if let window {
@@ -471,7 +605,9 @@ final class BooState: ObservableObject {
         let workspaceSurfaces = workspace.controller.allTabIds.compactMap { surfaces[$0] }
         let close = { [weak self] in
             guard let self else { return }
-            self.performCloseWorkspace(id)
+            self.performUndoableStateChange("Close Workspace") {
+                self.performCloseWorkspace(id)
+            }
         }
 
         guard workspaceSurfaces.contains(where: { $0.needsConfirmQuit }) else {
@@ -613,12 +749,16 @@ final class BooState: ObservableObject {
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
         focusAfterCreate: Bool = true
     ) -> TabID? {
-        newTab(
-            in: controller,
-            inPane: paneId,
-            baseConfig: baseConfig,
-            focusAfterCreate: focusAfterCreate
-        )
+        var createdTabId: TabID?
+        performUndoableStateChange("New Tab") {
+            createdTabId = newTab(
+                in: controller,
+                inPane: paneId,
+                baseConfig: baseConfig,
+                focusAfterCreate: focusAfterCreate
+            )
+        }
+        return createdTabId
     }
 
     @discardableResult
@@ -836,11 +976,13 @@ final class BooState: ObservableObject {
 
         activateWorkspace(.init(id: workspace.id, reason: .surfaceAction))
 
-        // Stash the source and config for didSplitPane to pick up when
-        // it spawns the new surface.
-        pendingSplitSource = sourceSurface
-        pendingSplitConfig = baseConfig
-        _ = targetController.splitPane(orientation: orientation)
+        performUndoableStateChange("New Split") {
+            // Stash the source and config for didSplitPane to pick up when
+            // it spawns the new surface.
+            pendingSplitSource = sourceSurface
+            pendingSplitConfig = baseConfig
+            _ = targetController.splitPane(orientation: orientation)
+        }
     }
 
     /// Temporary holder for the ghostty surface config to apply to the
@@ -969,7 +1111,9 @@ final class BooState: ObservableObject {
 
     @objc private func onGhosttyNewTab(_ note: Notification) {
         guard let targetController = newTabTargetController(for: note) else { return }
-        newTab(in: targetController, baseConfig: newSurfaceConfig(from: note))
+        performUndoableStateChange("New Tab") {
+            newTab(in: targetController, baseConfig: newSurfaceConfig(from: note))
+        }
     }
 
     @objc private func onGhosttyNewSplit(_ note: Notification) {
@@ -981,13 +1125,10 @@ final class BooState: ObservableObject {
     }
 
     @objc private func onGhosttyCloseSurface(_ note: Notification) {
-        guard let route = surfaceRoute(for: note) else { return }
+        guard let route = surfaceRoute(for: note),
+              let pane = route.paneId else { return }
 
-        // Route through `closeTab` so our `shouldCloseTab` gate handles
-        // confirmation uniformly. The `process_alive` hint in the userInfo is
-        // equivalent to the surface's `needsConfirmQuit`, which is what the
-        // gate already checks.
-        _ = route.controller.closeTab(route.tabId)
+        closeTabUndoably(route.tabId, inPane: pane, controller: route.controller)
     }
 
     /// Handle ⌘⌥arrow (and ⌘[ / ⌘] for previous/next) by asking Bonsplit
@@ -1132,59 +1273,47 @@ final class BooState: ObservableObject {
 
 @MainActor
 extension BooState: BonsplitDelegate {
-    /// Gate tab close on a confirmation alert when the surface still has a
-    /// running child process. Returning `false` vetoes the close; on OK we
-    /// reinvoke `closeTab` with the id pre-authorized.
+    /// Route tab close attempts through Boo's confirmation + undo path.
+    /// Returning `false` vetoes Bonsplit's first close attempt; Boo then
+    /// re-invokes `closeTab` with the id pre-authorized inside an undoable
+    /// mutation.
     func splitTabBar(
         _ controller: BonsplitController,
         shouldCloseTab tab: Tab,
         inPane pane: PaneID
     ) -> Bool {
-        // Second pass after the user confirmed - let it through.
+        // Second pass from Boo's undo-aware close helper - let it through.
         if confirmedCloseTabIds.remove(tab.id) != nil {
             return true
         }
 
-        // If the tab's surface doesn't need confirmation, close immediately.
-        guard let surface = surfaces[tab.id], surface.needsConfirmQuit else {
-            return true
-        }
+        guard surfaces[tab.id] != nil else { return true }
 
-        // Show confirmation; on OK, pre-authorize and retry the close.
-        presentCloseConfirmation(
-            messageText: "Close Terminal?",
-            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed."
-        ) { [weak self] in
-            guard let self else { return }
-            self.confirmedCloseTabIds.insert(tab.id)
-            _ = controller.closeTab(tab.id, inPane: pane)
+        // Always route the first attempt through Boo's helper so close buttons,
+        // keybindings, and ghostty action notifications all share confirmation
+        // and undo/redo behavior.
+        DispatchQueue.main.async { [weak self] in
+            self?.closeTabUndoably(tab.id, inPane: pane, controller: controller)
         }
         return false
     }
 
-    /// Gate pane close on a confirmation alert if any tab in the pane has a
-    /// running process. Mirrors `shouldCloseTab` but aggregates across every
-    /// surface in the pane.
+    /// Route pane close attempts through Boo's confirmation + undo path.
+    /// Whole-pane closes need pre-close tab ids so Boo can release the surfaces
+    /// after Bonsplit collapses the pane.
     func splitTabBar(
         _ controller: BonsplitController,
         shouldClosePane pane: PaneID
     ) -> Bool {
         if confirmedClosePaneIds.remove(pane) != nil {
+            closingPaneTabIds[pane] = controller.tabs(inPane: pane).map(\.id)
             return true
         }
 
-        let paneSurfaces = controller.tabs(inPane: pane).compactMap { surfaces[$0.id] }
-        guard paneSurfaces.contains(where: { $0.needsConfirmQuit }) else {
-            return true
-        }
+        guard !controller.tabs(inPane: pane).isEmpty else { return true }
 
-        presentCloseConfirmation(
-            messageText: "Close Split?",
-            informativeText: "A terminal in this split still has a running process. If you close the split the process will be killed."
-        ) { [weak self] in
-            guard let self else { return }
-            self.confirmedClosePaneIds.insert(pane)
-            _ = controller.closePane(pane)
+        DispatchQueue.main.async { [weak self] in
+            self?.closePaneUndoably(pane, controller: controller)
         }
         return false
     }
@@ -1222,6 +1351,92 @@ extension BooState: BonsplitDelegate {
         }
     }
 
+    private func closeTabUndoably(
+        _ tabId: TabID,
+        inPane pane: PaneID,
+        controller: BonsplitController,
+        actionName: String = "Close Tab"
+    ) {
+        guard let surface = surfaces[tabId] else { return }
+
+        let close = { [weak self] in
+            guard let self else { return }
+            if self.surfaces.count <= 1 {
+                (self.window?.windowController as? BooController)?.closeWindowImmediately()
+                return
+            }
+
+            self.performUndoableStateChange(actionName) {
+                self.confirmedCloseTabIds.insert(tabId)
+                if !controller.closeTab(tabId, inPane: pane) {
+                    self.confirmedCloseTabIds.remove(tabId)
+                }
+            }
+        }
+
+        guard surface.needsConfirmQuit else {
+            close()
+            return
+        }
+
+        presentCloseConfirmation(
+            messageText: "Close Terminal?",
+            informativeText: "The terminal still has a running process. If you close the terminal the process will be killed.",
+            onConfirm: close
+        )
+    }
+
+    private func closePaneUndoably(
+        _ pane: PaneID,
+        controller: BonsplitController,
+        actionName: String = "Close Split"
+    ) {
+        let tabIds = controller.tabs(inPane: pane).map(\.id)
+        guard !tabIds.isEmpty else { return }
+
+        let paneSurfaces = tabIds.compactMap { surfaces[$0] }
+        let close = { [weak self] in
+            guard let self else { return }
+            if tabIds.count >= self.surfaces.count {
+                (self.window?.windowController as? BooController)?.closeWindowImmediately()
+                return
+            }
+
+            self.performUndoableStateChange(actionName) {
+                self.confirmedClosePaneIds.insert(pane)
+                if !controller.closePane(pane) {
+                    self.confirmedClosePaneIds.remove(pane)
+                    self.closingPaneTabIds.removeValue(forKey: pane)
+                }
+            }
+        }
+
+        guard paneSurfaces.contains(where: { $0.needsConfirmQuit }) else {
+            close()
+            return
+        }
+
+        presentCloseConfirmation(
+            messageText: "Close Split?",
+            informativeText: "A terminal in this split still has a running process. If you close the split the process will be killed.",
+            onConfirm: close
+        )
+    }
+
+    private func discardSurface(for tabId: TabID) -> Bool {
+        guard let surface = surfaces[tabId] else { return false }
+        let wasFocused = focusedOwnedSurface === surface || window?.firstResponder === surface
+
+        surface.cachedScrollView = nil
+        if wasFocused {
+            surface.focusDidChange(false)
+            focusedOwnedSurface = nil
+        }
+        surfaces.removeValue(forKey: tabId)
+        surfaceSubscriptions.removeValue(forKey: tabId)
+        return wasFocused
+    }
+
     /// Free the surface when its tab is closed. Without this the surface
     /// (and its child process) would leak for the lifetime of the window.
     ///
@@ -1234,20 +1449,7 @@ extension BooState: BonsplitDelegate {
         fromPane pane: PaneID
     ) {
         let closingSurface = surfaces[tabId]
-        let closingSurfaceWasFocused = closingSurface.map {
-            focusedOwnedSurface === $0 || window?.firstResponder === $0
-        } ?? false
-
-        // Break retain cycle between SurfaceView and SurfaceScrollView
-        if let closingSurface {
-            closingSurface.cachedScrollView = nil
-            if closingSurfaceWasFocused {
-                closingSurface.focusDidChange(false)
-                focusedOwnedSurface = nil
-            }
-        }
-        surfaces.removeValue(forKey: tabId)
-        surfaceSubscriptions.removeValue(forKey: tabId)
+        let closingSurfaceWasFocused = discardSurface(for: tabId)
         updateWindowChromeTabId()
 
         if surfaces.isEmpty {
@@ -1296,8 +1498,22 @@ extension BooState: BonsplitDelegate {
         _ controller: BonsplitController,
         didClosePane paneId: PaneID
     ) {
+        let closedTabIds = closingPaneTabIds.removeValue(forKey: paneId) ?? []
+        var removedFocusedSurface = false
+        for tabId in closedTabIds {
+            removedFocusedSurface = discardSurface(for: tabId) || removedFocusedSurface
+        }
+
+        if surfaces.isEmpty {
+            window?.orderOut(nil)
+            DispatchQueue.main.async { [weak self] in
+                self?.window?.performClose(nil)
+            }
+            return
+        }
+
         // Capture flags now - they may change by the time async runs.
-        let shouldRefocus = !isChangingFocus && !isDraggingTabOut
+        let shouldRefocus = !isChangingFocus && !isDraggingTabOut && (removedFocusedSurface || controller.focusedPaneId == paneId)
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1348,6 +1564,18 @@ extension BooState: BonsplitDelegate {
         }
     }
 
+    func splitTabBar(
+        _ controller: BonsplitController,
+        shouldCreateTab tab: Tab,
+        inPane pane: PaneID
+    ) -> Bool {
+        if !isCreatingBooManagedTab,
+           undoManager?.isUndoRegistrationEnabled == true {
+            pendingBonsplitCreateTabUndoState = BooRestorableState(from: self)
+        }
+        return true
+    }
+
     /// Create a surface for tabs created by Bonsplit (e.g. + button in tab bar).
     /// Tabs created via `newTab()` already have surfaces attached.
     func splitTabBar(
@@ -1361,14 +1589,21 @@ extension BooState: BonsplitDelegate {
         guard !isCreatingBooManagedTab else { return }
 
         // Skip if this tab already has a surface.
-        guard surfaces[tab.id] == nil else { return }
-        guard let app = ghostty.app else { return }
+        guard surfaces[tab.id] == nil else {
+            pendingBonsplitCreateTabUndoState = nil
+            return
+        }
+        guard let app = ghostty.app else {
+            pendingBonsplitCreateTabUndoState = nil
+            return
+        }
 
         // Create a new surface for this tab
         let surface = Ghostty.SurfaceView(app, baseConfig: nil, uuid: tab.id.id)
         registerSurface(surface, forTab: tab.id)
         focusSurface(for: tab.id, reason: .tabCreated)
         updateWindowChromeTabId()
+        registerPendingBonsplitCreateTabUndoIfNeeded()
     }
 
     /// Focus the surface when the user switches tabs.
@@ -1603,7 +1838,7 @@ extension BooState: BonsplitDelegate {
     func closeCurrentTab() {
         guard let paneId = controller.focusedPaneId,
               let tab = controller.selectedTab(inPane: paneId) else { return }
-        _ = controller.closeTab(tab.id)
+        closeTabUndoably(tab.id, inPane: paneId, controller: controller)
     }
 
     /// Close the current pane. If only one pane exists, closes the current tab.
@@ -1614,7 +1849,7 @@ extension BooState: BonsplitDelegate {
         } else {
             // Close the focused pane
             guard let paneId = controller.focusedPaneId else { return }
-            _ = controller.closePane(paneId)
+            closePaneUndoably(paneId, controller: controller)
         }
     }
 

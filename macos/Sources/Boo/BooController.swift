@@ -24,6 +24,32 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     private var keyDownMonitor: Any?
     private var isBackgroundOpaque = false
 
+    override var undoManager: ExpiringUndoManager? {
+        if let result = window?.undoManager as? ExpiringUndoManager {
+            return result
+        }
+
+        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return nil }
+        return appDelegate.undoManager
+    }
+
+    private var undoExpiration: Duration {
+        ghostty.config.undoTimeout
+    }
+
+    private struct WindowUndoState {
+        let frame: NSRect
+        let state: BooRestorableState
+    }
+
+    private var undoState: WindowUndoState? {
+        guard let window, !state.surfaces.isEmpty else { return nil }
+        return WindowUndoState(
+            frame: window.frame,
+            state: BooRestorableState(from: state)
+        )
+    }
+
     // MARK: - Factory
 
     /// Open a new Boo window. Signature matches `TerminalController.newWindow`
@@ -49,6 +75,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
                 c.retryApplyInitialBooContentSize()
             }
         }
+        c.registerNewWindowUndo(baseConfig: baseConfig)
         return c
     }
 
@@ -75,6 +102,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             // Make the new window key so the old window properly resigns
             window.makeKeyAndOrderFront(nil)
         }
+        c.registerNewWindowUndo(adopting: surface, position: position)
         return c
     }
 
@@ -106,6 +134,126 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             // No existing window, create a new one
             return newWindow(ghostty, withBaseConfig: baseConfig)
         }
+    }
+
+    static func closeAllWindows() {
+        let controllers = all
+        guard !controllers.isEmpty else { return }
+
+        guard let confirmWindow = controllers
+            .first(where: { controller in
+                controller.state.surfaces.values.contains { surface in
+                    surface.needsConfirmQuit
+                }
+            })?
+            .window
+        else {
+            closeAllWindowsImmediately(controllers)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Close All Windows?"
+        alert.informativeText = "All terminal sessions will be terminated."
+        alert.addButton(withTitle: "Close All Windows")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: confirmWindow) { response in
+            if response == .alertFirstButtonReturn {
+                alert.window.orderOut(nil)
+                closeAllWindowsImmediately(controllers)
+            }
+        }
+    }
+
+    private static func closeAllWindowsImmediately(_ controllers: [BooController]) {
+        let undoManager = (NSApp.delegate as? AppDelegate)?.undoManager
+        undoManager?.beginUndoGrouping()
+        for controller in controllers where controller.window != nil {
+            controller.closeWindowImmediately()
+        }
+        undoManager?.setActionName("Close All Windows")
+        undoManager?.endUndoGrouping()
+    }
+
+    private static func restoreWindow(
+        _ ghostty: Ghostty.App,
+        from undoState: WindowUndoState
+    ) -> BooController {
+        let controller = BooController(ghostty: ghostty, restorableState: undoState.state)
+        controller.showWindow(nil)
+        if let window = controller.window {
+            window.setFrame(undoState.frame, display: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+        controller.state.restoreFocus(toSurfaceWithId: undoState.state.focusedSurfaceId)
+        return controller
+    }
+
+    private func registerNewWindowUndo(baseConfig: Ghostty.SurfaceConfiguration?) {
+        registerNewWindowUndo {
+            _ = BooController.newWindow($0, withBaseConfig: baseConfig)
+        }
+    }
+
+    private func registerNewWindowUndo(
+        adopting surface: Ghostty.SurfaceView,
+        position: NSPoint?
+    ) {
+        registerNewWindowUndo {
+            _ = BooController.newWindow($0, withSurface: surface, position: position)
+        }
+    }
+
+    private func registerNewWindowUndo(
+        redo: @escaping (Ghostty.App) -> Void
+    ) {
+        guard let undoManager, undoManager.isUndoRegistrationEnabled else { return }
+        undoManager.setActionName("New Window")
+        undoManager.registerUndo(
+            withTarget: self,
+            expiresAfter: undoExpiration
+        ) { target in
+            undoManager.disableUndoRegistration {
+                target.closeWindowImmediately(registerUndo: false)
+            }
+
+            undoManager.registerUndo(
+                withTarget: target.ghostty,
+                expiresAfter: target.undoExpiration
+            ) { ghostty in
+                redo(ghostty)
+            }
+        }
+    }
+
+    func closeWindowImmediately(registerUndo: Bool = true) {
+        let snapshot = undoState
+
+        if registerUndo,
+           let undoManager,
+           undoManager.isUndoRegistrationEnabled,
+           let snapshot {
+            undoManager.setActionName("Close Window")
+            undoManager.registerUndo(
+                withTarget: ghostty,
+                expiresAfter: undoExpiration
+            ) { ghostty in
+                let restored = BooController.restoreWindow(ghostty, from: snapshot)
+                undoManager.registerUndo(
+                    withTarget: restored,
+                    expiresAfter: restored.undoExpiration
+                ) { target in
+                    target.closeWindowImmediately()
+                }
+            }
+        }
+
+        for surface in state.surfaces.values {
+            surface.focusDidChange(false)
+            surface.cachedScrollView = nil
+        }
+        window?.close()
     }
 
     // MARK: - Lifecycle
@@ -179,6 +327,12 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     private func configureWindow() {
         guard let window else { return }
 
+        // NSWindow caches its undo manager the first time `window.undoManager`
+        // is read. Attach the delegate before SwiftUI/content installation so
+        // any early undo-manager lookup gets AppDelegate's ExpiringUndoManager
+        // via `windowWillReturnUndoManager(_:)` instead of a private default.
+        window.delegate = self
+
         let root = BooRootView(state: state)
         window.contentView = NSHostingView(rootView: root)
 
@@ -241,7 +395,6 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         state.window = window
         state.syncWindowChromeToWindow()
 
-        window.delegate = self
         BooController.all.append(self)
 
         // Listen for config changes
@@ -313,6 +466,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     }
 
     deinit {
+        undoManager?.removeAllActions(withTarget: self)
         if let keyDownMonitor {
             NSEvent.removeMonitor(keyDownMonitor)
         }
@@ -994,25 +1148,37 @@ extension BooController: NSWindowDelegate {
     /// Direct `window.close()` bypasses this delegate (AppKit behavior),
     /// which is why we route the keybind-driven close through `performClose`.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // No surfaces means nothing to confirm - let the close proceed.
+        // No surfaces means nothing to confirm or undo - let the close proceed.
         if state.surfaces.isEmpty { return true }
 
-        // If nothing in the window needs confirmation, close immediately.
+        let close: () -> Void = { [weak self] in
+            self?.closeWindowImmediately()
+        }
+
+        // If nothing in the window needs confirmation, close immediately so
+        // the undo snapshot is captured before AppKit tears the window down.
         let needsConfirm = state.surfaces.values.contains { $0.needsConfirmQuit }
-        if !needsConfirm { return true }
+        if !needsConfirm {
+            close()
+            return false
+        }
 
         state.presentCloseConfirmation(
             messageText: "Close Window?",
-            informativeText: "All terminals in this window will be closed. Any running processes will be killed."
-        ) { [weak sender] in
-            sender?.close()
-        }
+            informativeText: "All terminals in this window will be closed. Any running processes will be killed.",
+            onConfirm: close
+        )
         return false
     }
 
     func window(_ window: NSWindow, willEncodeRestorableState state: NSCoder) {
         guard restorable else { return }
         BooRestorableState(from: self.state).encode(with: state)
+    }
+
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return nil }
+        return appDelegate.undoManager
     }
 
     func windowWillClose(_ notification: Notification) {

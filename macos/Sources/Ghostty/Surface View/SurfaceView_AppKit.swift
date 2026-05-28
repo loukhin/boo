@@ -176,7 +176,7 @@ extension Ghostty {
 
         private var markedText: NSMutableAttributedString
         private(set) var focused: Bool = false
-        
+
         /// Cached scroll view wrapper for this surface. SwiftUI may call
         /// makeOSView multiple times during view hierarchy restructuring.
         /// We cache the wrapper to ensure consistent behavior.
@@ -214,6 +214,15 @@ extension Ghostty {
 
         // We need to support being a first responder so that we can get input events
         override var acceptsFirstResponder: Bool { return true }
+
+        // Ghostty's structural undo state lives on the window undo manager
+        // returned by the window delegate. Surface-targeted keybindings such
+        // as Cmd-Z ask the focused SurfaceView for its undo manager, so make
+        // that lookup explicitly use the containing window's manager instead
+        // of relying on intermediate SwiftUI/AppKit wrapper responders.
+        override var undoManager: UndoManager? {
+            window?.undoManager ?? super.undoManager
+        }
 
         init(_ app: ghostty_app_t, baseConfig: SurfaceConfiguration? = nil, uuid: UUID? = nil) {
             self.markedText = NSMutableAttributedString()
@@ -355,7 +364,7 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
-            
+
             // New surfaces start unfocused. Tell libghostty so the cursor
             // renders correctly (hollow instead of filled).
             ghostty_surface_set_focus(surface, false)
@@ -401,6 +410,11 @@ extension Ghostty {
         override func endSearch() {
             Ghostty.moveFocus(to: self)
             super.endSearch()
+        }
+
+        private func syncFocusWithFirstResponder() {
+            guard let window else { return }
+            focusDidChange(NSApp.isActive && window.isKeyWindow && window.firstResponder === self)
         }
 
         override func focusDidChange(_ focused: Bool) {
@@ -663,8 +677,11 @@ extension Ghostty {
             suppressNextLeftMouseUp = false
 
             // If we're already the first responder then no focus transfer is
-            // happening, so the click should continue as normal.
+            // happening, so the click should continue as normal. Sync our
+            // cached focus state in case it was stale after window/app
+            // activation or SwiftUI reparenting.
             guard window.firstResponder !== self else {
+                syncFocusWithFirstResponder()
                 return event
             }
 
@@ -673,12 +690,14 @@ extension Ghostty {
             // get forwarded to the terminal as a mouse click.
             if NSApp.isActive && window.isKeyWindow {
                 window.makeFirstResponder(self)
+                syncFocusWithFirstResponder()
                 suppressNextLeftMouseUp = true
                 return nil
             }
 
             // Make ourselves the first responder
             window.makeFirstResponder(self)
+            syncFocusWithFirstResponder()
 
             // We have to keep processing the event so that AppKit can properly
             // focus the window and dispatch events. If you return nil here then
@@ -693,6 +712,7 @@ extension Ghostty {
 
             // Command keyUp events are never sent to the normal responder chain
             // so we send them here.
+            syncFocusWithFirstResponder()
             guard focused else { return event }
             self.keyUp(with: event)
             return nil
@@ -1072,6 +1092,8 @@ extension Ghostty {
                 return
             }
 
+            syncFocusWithFirstResponder()
+
             // On any keyDown event we unset our bell state
             bell = false
 
@@ -1281,6 +1303,11 @@ extension Ghostty {
             // Besides C-/, its important we don't process key equivalents if unfocused
             // because there are other event listeners for that (i.e. AppDelegate's
             // local event handler).
+            //
+            // Sync from AppKit's first-responder truth before checking. Hosts
+            // that reparent surfaces through SwiftUI can briefly leave our
+            // cached `focused` flag stale even though this view owns keyboard input.
+            syncFocusWithFirstResponder()
             if !focused {
                 return false
             }
