@@ -28,7 +28,7 @@ struct SplitViewContainer<Content: View>: View {
                 // modifier doesn't break anything; hosts that *do* want
                 // keyboard-focusable pane navigation can add it back at
                 // the pane level.
-                .onChange(of: geometry.size) { _, newSize in
+                .onChange(of: geometry.size) { _, _ in
                     updateContainerFrame(geometry: geometry)
                 }
                 .onAppear {
@@ -46,7 +46,7 @@ struct SplitViewContainer<Content: View>: View {
 
     @ViewBuilder
     private var splitNodeContent: some View {
-        if let rootNode = controller.rootNode {
+        if let rootNode = controller.visibleRootNode {
             SplitNodeView(
                 node: rootNode,
                 contentBuilder: contentBuilder,

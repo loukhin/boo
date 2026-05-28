@@ -1028,6 +1028,10 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
+                if surfaceView.window?.windowController is BooController {
+                    surfaceView.window?.zoom(nil)
+                    return
+                }
                 NotificationCenter.default.post(
                     name: .ghosttyMaximizeDidToggle,
                     object: surfaceView
@@ -1234,7 +1238,9 @@ extension Ghostty {
             // treats each native tab group as a single "window" for navigation
             // purposes, since goto_tab handles per-tab navigation.
             let candidates: [NSWindow] = NSApplication.shared.windows.filter { window in
-                guard window.windowController is BaseTerminalController else { return false }
+                let isTerminalWindow = window.windowController is BaseTerminalController
+                    || window.windowController is BooController
+                guard isTerminalWindow else { return false }
                 guard window.isVisible, !window.isMiniaturized else { return false }
                 // For native tabs, only include the selected tab in each group
                 if let group = window.tabGroup, group.selectedWindow !== window {
@@ -1269,10 +1275,14 @@ extension Ghostty {
                 let candidate = candidates[index]
                 if candidate.isVisible, !candidate.isMiniaturized {
                     candidate.makeKeyAndOrderFront(nil)
-                    // Also focus the terminal surface within the window
+                    // Also focus the terminal surface within the window.
                     if let controller = candidate.windowController as? BaseTerminalController,
                        let surface = controller.focusedSurface {
                         Ghostty.moveFocus(to: surface)
+                    } else if let controller = candidate.windowController as? BooController {
+                        Task { @MainActor in
+                            controller.state.refocusCurrentSurface()
+                        }
                     }
                     return true
                 }
@@ -1294,12 +1304,18 @@ extension Ghostty {
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
-
-                    // If the window has no splits, the action is not performable
-                    guard controller.surfaceTree.isSplit else { return false }
-
                     guard let resizeDirection = SplitResizeDirection.from(direction: resize.direction) else { return false }
+
+                    if let controller = surfaceView.window?.windowController as? BaseTerminalController {
+                        // If the window has no splits, the action is not performable.
+                        guard controller.surfaceTree.isSplit else { return false }
+                    } else if surfaceView.window?.windowController is BooController {
+                        // Boo performs pane-specific routing in BooState because
+                        // it doesn't use BaseTerminalController's SplitTree.
+                    } else {
+                        return false
+                    }
+
                     NotificationCenter.default.post(
                         name: Notification.didResizeSplit,
                         object: surfaceView,
@@ -1348,10 +1364,16 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return false }
                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                guard let controller = surfaceView.window?.windowController as? BaseTerminalController else { return false }
 
-                // If the window has no splits, the action is not performable
-                guard controller.surfaceTree.isSplit else { return false }
+                if let controller = surfaceView.window?.windowController as? BaseTerminalController {
+                    // If the window has no splits, the action is not performable.
+                    guard controller.surfaceTree.isSplit else { return false }
+                } else if surfaceView.window?.windowController is BooController {
+                    // Boo performs pane-specific routing in BooState because
+                    // it doesn't use BaseTerminalController's SplitTree.
+                } else {
+                    return false
+                }
 
                 NotificationCenter.default.post(
                     name: Notification.didToggleSplitZoom,
@@ -1523,7 +1545,10 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let window = surfaceView.window as? TerminalWindow else { return }
+                guard let window = surfaceView.window else { return }
+                let isSupportedWindow = window is TerminalWindow
+                    || window.windowController is BooController
+                guard isSupportedWindow else { return }
 
                 switch mode {
                 case .on:
@@ -1647,11 +1672,20 @@ extension Ghostty {
                 let titleOverride = title.isEmpty ? nil : title
                 guard let surface = target.target.surface else { return false }
                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                guard let window = surfaceView.window,
-                      let controller = window.windowController as? BaseTerminalController
-                else { return false }
-                controller.titleOverride = titleOverride
-                return true
+                guard let window = surfaceView.window else { return false }
+                if let controller = window.windowController as? BaseTerminalController {
+                    controller.titleOverride = titleOverride
+                    return true
+                } else if let controller = window.windowController as? BooController {
+                    Task { @MainActor in
+                        controller.state.setWorkspaceTitle(
+                            containing: surfaceView,
+                            title: titleOverride
+                        )
+                    }
+                    return true
+                }
+                return false
 
             default:
                 assertionFailure()
@@ -1724,20 +1758,32 @@ extension Ghostty {
             case .tab:
                 switch target.tag {
                 case GHOSTTY_TARGET_APP:
-                    guard let window = NSApp.mainWindow ?? NSApp.keyWindow,
-                          let controller = window.windowController as? BaseTerminalController
-                    else { return false }
-                    controller.promptTabTitle()
-                    return true
+                    guard let window = NSApp.mainWindow ?? NSApp.keyWindow else { return false }
+                    if let controller = window.windowController as? BaseTerminalController {
+                        controller.promptTabTitle()
+                        return true
+                    } else if let controller = window.windowController as? BooController {
+                        Task { @MainActor in
+                            controller.state.promptCurrentWorkspaceTitle()
+                        }
+                        return true
+                    }
+                    return false
 
                 case GHOSTTY_TARGET_SURFACE:
                     guard let surface = target.target.surface else { return false }
                     guard let surfaceView = self.surfaceView(from: surface) else { return false }
-                    guard let window = surfaceView.window,
-                          let controller = window.windowController as? BaseTerminalController
-                    else { return false }
-                    controller.promptTabTitle()
-                    return true
+                    guard let window = surfaceView.window else { return false }
+                    if let controller = window.windowController as? BaseTerminalController {
+                        controller.promptTabTitle()
+                        return true
+                    } else if let controller = window.windowController as? BooController {
+                        Task { @MainActor in
+                            controller.state.promptWorkspaceTitle(containing: surfaceView)
+                        }
+                        return true
+                    }
+                    return false
 
                 default:
                     assertionFailure()

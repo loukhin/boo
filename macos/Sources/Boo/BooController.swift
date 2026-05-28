@@ -1038,6 +1038,10 @@ extension BooController {
         window?.performClose(nil)
     }
 
+    @objc func changeTabTitle(_ sender: Any?) {
+        state.promptCurrentWorkspaceTitle()
+    }
+
     @objc func splitRight(_ sender: Any?) {
         state.splitCurrentPane(direction: .right)
     }
@@ -1070,10 +1074,14 @@ extension BooController {
         window?.toggleFullScreen(sender)
     }
 
+    @objc func toggleCommandPalette(_ sender: Any?) {
+        state.toggleCommandPalette()
+    }
+
     // MARK: - Window Menu Split Actions
 
     @objc func splitZoom(_ sender: Any?) {
-        // Boo doesn't support split zoom - no-op
+        state.toggleSplitZoom()
     }
 
     @objc func splitMoveFocusPrevious(_ sender: Any?) {
@@ -1101,37 +1109,41 @@ extension BooController {
     }
 
     @objc func equalizeSplits(_ sender: Any?) {
-        // Boo doesn't support equalize splits - no-op
+        state.equalizeSplits()
     }
 
     @objc func moveSplitDividerUp(_ sender: Any?) {
-        // Boo doesn't support divider movement - no-op
+        state.resizeCurrentSplit(direction: .up)
     }
 
     @objc func moveSplitDividerDown(_ sender: Any?) {
-        // Boo doesn't support divider movement - no-op
+        state.resizeCurrentSplit(direction: .down)
     }
 
     @objc func moveSplitDividerLeft(_ sender: Any?) {
-        // Boo doesn't support divider movement - no-op
+        state.resizeCurrentSplit(direction: .left)
     }
 
     @objc func moveSplitDividerRight(_ sender: Any?) {
-        // Boo doesn't support divider movement - no-op
+        state.resizeCurrentSplit(direction: .right)
     }
 
     // MARK: - Menu Validation
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(splitZoom(_:)),
-             #selector(equalizeSplits(_:)),
-             #selector(moveSplitDividerUp(_:)),
-             #selector(moveSplitDividerDown(_:)),
-             #selector(moveSplitDividerLeft(_:)),
-             #selector(moveSplitDividerRight(_:)):
-            // Disable unsupported split operations
-            return false
+        case #selector(splitZoom(_:)):
+            return state.canToggleSplitZoom()
+        case #selector(equalizeSplits(_:)):
+            return state.canEqualizeSplits()
+        case #selector(moveSplitDividerUp(_:)):
+            return state.canResizeCurrentSplit(direction: .up)
+        case #selector(moveSplitDividerDown(_:)):
+            return state.canResizeCurrentSplit(direction: .down)
+        case #selector(moveSplitDividerLeft(_:)):
+            return state.canResizeCurrentSplit(direction: .left)
+        case #selector(moveSplitDividerRight(_:)):
+            return state.canResizeCurrentSplit(direction: .right)
         default:
             return true
         }

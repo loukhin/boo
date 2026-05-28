@@ -19,6 +19,12 @@ extension UserDefaults {
     }
 }
 
+struct BooCommandPaletteSurfaceEntry {
+    let surface: Ghostty.SurfaceView
+    let title: String
+    let subtitle: String?
+}
+
 /// Per-window Boo state. Owns the Bonsplit controller, the surfaces hosted by
 /// its tabs, and the notification subscriptions that translate ghostty action
 /// callbacks into Bonsplit operations.
@@ -81,6 +87,13 @@ final class BooState: ObservableObject {
 
     /// Public access to the focused surface for menu actions.
     var focusedSurface: Ghostty.SurfaceView? { focusedOwnedSurface }
+
+    /// Command palette presentation state. The palette is ephemeral UI and is
+    /// intentionally not part of restoration or undo snapshots.
+    @Published var commandPaletteIsShowing: Bool = false
+    @Published private(set) var commandPaletteSurface: Ghostty.SurfaceView?
+    private var commandPaletteDidRedirectFocus = false
+    private var isRestoringCommandPaletteFocus = false
 
     /// Guard to prevent re-entrant focus changes. When true, focus-related
     /// callbacks are suppressed to avoid oscillation loops.
@@ -243,6 +256,7 @@ final class BooState: ObservableObject {
         if focusedOwnedSurface === surface {
             focusedOwnedSurface = nil
         }
+        clearCommandPaletteIfNeeded(removing: surface)
 
         // Remove from our tracking
         surfaces.removeValue(forKey: tab.id)
@@ -348,6 +362,10 @@ final class BooState: ObservableObject {
         pendingBonsplitCreateTabUndoState = nil
         pendingSplitConfig = nil
         pendingSplitSource = nil
+        commandPaletteIsShowing = false
+        commandPaletteSurface = nil
+        commandPaletteDidRedirectFocus = false
+        isRestoringCommandPaletteFocus = false
 
         restore(from: snapshot)
         syncWindowChromeToWindow()
@@ -559,6 +577,46 @@ final class BooState: ObservableObject {
         return path
     }
 
+    @discardableResult
+    func setCurrentWorkspaceTitle(_ title: String?) -> Bool {
+        guard let activeWorkspaceId else { return false }
+        return setWorkspaceTitle(activeWorkspaceId, title: title)
+    }
+
+    @discardableResult
+    func setWorkspaceTitle(
+        containing surface: Ghostty.SurfaceView,
+        title: String?
+    ) -> Bool {
+        guard let route = surfaceRoute(for: surface) else { return false }
+        return setWorkspaceTitle(route.workspace.id, title: title)
+    }
+
+    func promptCurrentWorkspaceTitle() {
+        guard let activeWorkspaceId else { return }
+        renameWorkspace(activeWorkspaceId)
+    }
+
+    @discardableResult
+    func promptWorkspaceTitle(containing surface: Ghostty.SurfaceView) -> Bool {
+        guard let route = surfaceRoute(for: surface) else { return false }
+        renameWorkspace(route.workspace.id)
+        return true
+    }
+
+    @discardableResult
+    private func setWorkspaceTitle(_ id: WorkspaceID, title: String?) -> Bool {
+        guard let workspace = workspaces.first(where: { $0.id == id }) else { return false }
+        let newTitle = title?.isEmpty == true ? nil : title
+        guard workspace.customTitle != newTitle else { return true }
+
+        performUndoableStateChange("Rename Workspace") {
+            objectWillChange.send()
+            workspace.customTitle = newTitle
+        }
+        return true
+    }
+
     func renameWorkspace(_ id: WorkspaceID) {
         guard let workspace = workspaces.first(where: { $0.id == id }) else { return }
         let alert = NSAlert()
@@ -574,13 +632,7 @@ final class BooState: ObservableObject {
         let applyRename = { [weak self, weak textField] in
             guard let self, let textField else { return }
             let title = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let newTitle = title.isEmpty ? nil : title
-            guard workspace.customTitle != newTitle else { return }
-
-            self.performUndoableStateChange("Rename Workspace") {
-                self.objectWillChange.send()
-                workspace.customTitle = newTitle
-            }
+            _ = self.setWorkspaceTitle(workspace.id, title: title)
         }
 
         if let window {
@@ -701,6 +753,7 @@ final class BooState: ObservableObject {
 
         for tabId in removed.controller.allTabIds {
             if let surface = surfaces[tabId] {
+                clearCommandPaletteIfNeeded(removing: surface)
                 surface.cachedScrollView = nil
             }
             surfaces.removeValue(forKey: tabId)
@@ -1035,6 +1088,11 @@ final class BooState: ObservableObject {
             (Ghostty.Notification.ghosttyNewTab, #selector(onGhosttyNewTab(_:))),
             (Ghostty.Notification.ghosttyNewSplit, #selector(onGhosttyNewSplit(_:))),
             (Ghostty.Notification.ghosttyCloseSurface, #selector(onGhosttyCloseSurface(_:))),
+            (Ghostty.Notification.didToggleSplitZoom, #selector(onGhosttyToggleSplitZoom(_:))),
+            (Ghostty.Notification.didEqualizeSplits, #selector(onGhosttyEqualizeSplits(_:))),
+            (Ghostty.Notification.didResizeSplit, #selector(onGhosttyResizeSplit(_:))),
+            (.ghosttyCommandPaletteDidToggle, #selector(onGhosttyCommandPaletteDidToggle(_:))),
+            (Ghostty.Notification.ghosttyPresentTerminal, #selector(onGhosttyPresentTerminal(_:))),
             (Ghostty.Notification.ghosttyFocusSplit, #selector(onGhosttyFocusSplit(_:))),
             (Ghostty.Notification.ghosttyGotoTab, #selector(onGhosttyGotoTab(_:))),
             (.ghosttySurfaceFocusDidChange, #selector(onGhosttySurfaceFocusDidChange(_:))),
@@ -1129,6 +1187,73 @@ final class BooState: ObservableObject {
               let pane = route.paneId else { return }
 
         closeTabUndoably(route.tabId, inPane: pane, controller: route.controller)
+    }
+
+    @objc private func onGhosttyToggleSplitZoom(_ note: Notification) {
+        guard let route = surfaceRoute(for: note, requirePane: true),
+              let pane = route.paneId else { return }
+
+        activateWorkspace(for: route)
+        guard route.controller.canToggleZoomedPane(pane) else { return }
+        route.controller.focusPane(pane)
+        guard route.controller.toggleZoomedPane(pane) else { return }
+        focusCurrentTabSurface(
+            inPane: pane,
+            from: route.surface,
+            reason: .paneFocused
+        )
+    }
+
+    @objc private func onGhosttyEqualizeSplits(_ note: Notification) {
+        guard let route = surfaceRoute(for: note, requirePane: true),
+              let pane = route.paneId else { return }
+
+        activateWorkspace(for: route)
+        guard route.controller.canEqualizeSplits else { return }
+        route.controller.focusPane(pane)
+        guard route.controller.equalizeSplits() else { return }
+        focusCurrentTabSurface(
+            inPane: pane,
+            from: route.surface,
+            reason: .paneFocused
+        )
+    }
+
+    @objc private func onGhosttyResizeSplit(_ note: Notification) {
+        guard let route = surfaceRoute(for: note, requirePane: true),
+              let pane = route.paneId,
+              let direction = note.userInfo?[Ghostty.Notification.ResizeSplitDirectionKey]
+                as? Ghostty.SplitResizeDirection,
+              let amount = note.userInfo?[Ghostty.Notification.ResizeSplitAmountKey]
+                as? UInt16 else { return }
+
+        let navDirection = Self.navigationDirection(for: direction)
+        activateWorkspace(for: route)
+        guard route.controller.canResizeSplit(
+            containing: pane,
+            direction: navDirection
+        ) else { return }
+        route.controller.focusPane(pane)
+        guard route.controller.resizeSplit(
+            containing: pane,
+            direction: navDirection,
+            amount: amount
+        ) else { return }
+        focusCurrentTabSurface(
+            inPane: pane,
+            from: route.surface,
+            reason: .paneFocused
+        )
+    }
+
+    @objc private func onGhosttyCommandPaletteDidToggle(_ note: Notification) {
+        guard let route = surfaceRoute(for: note, requirePane: true) else { return }
+        showCommandPalette(for: route.surface)
+    }
+
+    @objc private func onGhosttyPresentTerminal(_ note: Notification) {
+        guard let route = surfaceRoute(for: note, requirePane: true) else { return }
+        presentSurface(route.surface)
     }
 
     /// Handle ⌘⌥arrow (and ⌘[ / ⌘] for previous/next) by asking Bonsplit
@@ -1239,6 +1364,17 @@ final class BooState: ObservableObject {
         case .right, .next:    return .right
         case .up:              return .up
         case .down:            return .down
+        }
+    }
+
+    private static func navigationDirection(
+        for d: Ghostty.SplitResizeDirection
+    ) -> NavigationDirection {
+        switch d {
+        case .left:  return .left
+        case .right: return .right
+        case .up:    return .up
+        case .down:  return .down
         }
     }
 
@@ -1432,6 +1568,7 @@ extension BooState: BonsplitDelegate {
             surface.focusDidChange(false)
             focusedOwnedSurface = nil
         }
+        clearCommandPaletteIfNeeded(removing: surface)
         surfaces.removeValue(forKey: tabId)
         surfaceSubscriptions.removeValue(forKey: tabId)
         return wasFocused
@@ -1682,6 +1819,8 @@ extension BooState: BonsplitDelegate {
             return
         }
 
+        markCommandPaletteFocusRedirectIfNeeded()
+
         // Skip if this surface is already the actual first responder.
         // We check both our tracking variable AND the actual AppKit state
         // because drag operations can steal first-responder without updating
@@ -1865,6 +2004,136 @@ extension BooState: BonsplitDelegate {
         )
     }
 
+    func toggleCommandPalette() {
+        if commandPaletteIsShowing {
+            commandPaletteIsShowing = false
+            return
+        }
+
+        showCommandPalette(for: focusedOwnedSurface ?? currentSelectedSurface())
+    }
+
+    func showCommandPalette(for surface: Ghostty.SurfaceView?) {
+        guard let surface,
+              let route = surfaceRoute(for: surface, requirePane: true),
+              let pane = route.paneId else { return }
+
+        activateWorkspace(for: route)
+        route.controller.focusPane(pane)
+        route.controller.selectTab(route.tabId)
+        commandPaletteSurface = surface
+        commandPaletteIsShowing = true
+
+        // Match Ghostty's normal terminal host: while the palette is visible,
+        // key equivalents and paste should belong to the palette text field,
+        // not the terminal surface.
+        _ = surface.resignFirstResponder()
+    }
+
+    func commandPaletteDidDismiss(representedSurface surface: Ghostty.SurfaceView) {
+        let shouldRestoreRepresentedSurface = !commandPaletteDidRedirectFocus
+        commandPaletteDidRedirectFocus = false
+
+        if shouldRestoreRepresentedSurface {
+            isRestoringCommandPaletteFocus = true
+            defer { isRestoringCommandPaletteFocus = false }
+
+            if let route = surfaceRoute(for: surface, requirePane: true),
+               let pane = route.paneId {
+                activateWorkspace(for: route)
+                route.controller.focusPane(pane)
+                route.controller.selectTab(route.tabId)
+                focusSurface(for: route.tabId, reason: .explicit)
+            } else {
+                surface.window?.makeFirstResponder(surface)
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.commandPaletteIsShowing else { return }
+            self.commandPaletteSurface = nil
+        }
+    }
+
+    func performCommandPaletteAction(
+        _ action: String,
+        on surfaceView: Ghostty.SurfaceView
+    ) {
+        guard let surface = surfaceView.surface else { return }
+        let len = action.utf8CString.count
+        guard len > 0 else { return }
+        _ = action.withCString { cString in
+            ghostty_surface_binding_action(surface, cString, UInt(len - 1))
+        }
+    }
+
+    private func clearCommandPaletteIfNeeded(removing surface: Ghostty.SurfaceView) {
+        guard commandPaletteSurface === surface else { return }
+        commandPaletteIsShowing = false
+        commandPaletteSurface = nil
+        commandPaletteDidRedirectFocus = false
+    }
+
+    private func markCommandPaletteFocusRedirectIfNeeded() {
+        guard commandPaletteSurface != nil,
+              !commandPaletteIsShowing,
+              !isRestoringCommandPaletteFocus else { return }
+        commandPaletteDidRedirectFocus = true
+    }
+
+    func commandPaletteSurfaceEntries() -> [BooCommandPaletteSurfaceEntry] {
+        workspaces.flatMap { workspace in
+            workspace.controller.allPaneIds.flatMap { paneId in
+                workspace.controller.tabs(inPane: paneId).compactMap { tab in
+                    guard let surface = surfaces[tab.id] else { return nil }
+
+                    let terminalTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let tabTitle = tab.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let title = if !terminalTitle.isEmpty {
+                        terminalTitle
+                    } else if !tabTitle.isEmpty {
+                        tabTitle
+                    } else {
+                        workspaceDisplayTitle(workspace)
+                    }
+                    let pwd = surface.pwd?.abbreviatedPath
+                    let workspaceTitle = workspaceDisplayTitle(workspace)
+                    let subtitleParts = [
+                        workspaceTitle == title ? nil : workspaceTitle,
+                        pwd == title ? nil : pwd,
+                    ].compactMap { $0 }
+                    let subtitle = subtitleParts.isEmpty
+                        ? nil
+                        : subtitleParts.joined(separator: " — ")
+
+                    return BooCommandPaletteSurfaceEntry(
+                        surface: surface,
+                        title: title,
+                        subtitle: subtitle
+                    )
+                }
+            }
+        }
+    }
+
+    func presentSurface(_ surface: Ghostty.SurfaceView) {
+        guard let route = surfaceRoute(for: surface, requirePane: true),
+              let pane = route.paneId else { return }
+
+        window?.makeKeyAndOrderFront(nil)
+        activateWorkspace(for: route)
+        route.controller.focusPane(pane)
+        route.controller.selectTab(route.tabId)
+        focusSurface(for: route.tabId, from: focusedOwnedSurface, reason: .explicit)
+        surface.highlight()
+
+        // Selecting a Focus: entry closes the palette first. The palette host
+        // then restores focus to the surface it was opened for on the next main
+        // queue turn, so mirror BaseTerminalController and re-assert the target
+        // shortly afterward.
+        Ghostty.moveFocus(to: surface, delay: 0.1)
+    }
+
     /// Split the current pane in the given direction.
     func splitCurrentPane(direction: SplitDirection) {
         guard let paneId = controller.focusedPaneId,
@@ -1879,6 +2148,64 @@ extension BooState: BonsplitDelegate {
         )
     }
 
+    func canToggleSplitZoom(for surface: Ghostty.SurfaceView) -> Bool {
+        guard let route = surfaceRoute(for: surface, requirePane: true),
+              let pane = route.paneId else { return false }
+        return route.controller.canToggleZoomedPane(pane)
+    }
+
+    func canToggleSplitZoom() -> Bool {
+        guard let paneId = controller.focusedPaneId else { return false }
+        return controller.canToggleZoomedPane(paneId)
+    }
+
+    func toggleSplitZoom() {
+        guard let paneId = controller.focusedPaneId else { return }
+        guard controller.toggleZoomedPane(paneId) else { return }
+        focusCurrentTabSurface(inPane: paneId, reason: .paneFocused)
+    }
+
+    func canEqualizeSplits(for surface: Ghostty.SurfaceView) -> Bool {
+        guard let route = surfaceRoute(for: surface, requirePane: true) else { return false }
+        return route.controller.canEqualizeSplits
+    }
+
+    func canEqualizeSplits() -> Bool {
+        controller.canEqualizeSplits
+    }
+
+    func equalizeSplits() {
+        guard let paneId = controller.focusedPaneId else { return }
+        guard controller.equalizeSplits() else { return }
+        focusCurrentTabSurface(inPane: paneId, reason: .paneFocused)
+    }
+
+    func canResizeSplit(
+        for surface: Ghostty.SurfaceView,
+        direction: NavigationDirection
+    ) -> Bool {
+        guard let route = surfaceRoute(for: surface, requirePane: true),
+              let pane = route.paneId else { return false }
+        return route.controller.canResizeSplit(containing: pane, direction: direction)
+    }
+
+    func canResizeCurrentSplit(direction: PaneNavigationDirection) -> Bool {
+        guard let paneId = controller.focusedPaneId,
+              let direction = Self.navigationDirection(for: direction) else { return false }
+        return controller.canResizeSplit(containing: paneId, direction: direction)
+    }
+
+    func resizeCurrentSplit(direction: PaneNavigationDirection, amount: UInt16 = 10) {
+        guard let paneId = controller.focusedPaneId,
+              let direction = Self.navigationDirection(for: direction) else { return }
+        guard controller.resizeSplit(
+            containing: paneId,
+            direction: direction,
+            amount: amount
+        ) else { return }
+        focusCurrentTabSurface(inPane: paneId, reason: .paneFocused)
+    }
+
     /// Convert our SplitDirection to ghostty's split direction.
     private func ghosttyDirection(for direction: SplitDirection) -> ghostty_action_split_direction_e {
         switch direction {
@@ -1886,6 +2213,19 @@ extension BooState: BonsplitDelegate {
         case .left: return GHOSTTY_SPLIT_DIRECTION_LEFT
         case .down: return GHOSTTY_SPLIT_DIRECTION_DOWN
         case .up: return GHOSTTY_SPLIT_DIRECTION_UP
+        }
+    }
+
+    private static func navigationDirection(
+        for direction: PaneNavigationDirection
+    ) -> NavigationDirection? {
+        switch direction {
+        case .left:     return .left
+        case .right:    return .right
+        case .up:       return .up
+        case .down:     return .down
+        case .previous,
+             .next:     return nil
         }
     }
 

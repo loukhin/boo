@@ -164,6 +164,7 @@ struct TabBarView: View {
             tab: tab,
             isSelected: pane.selectedTabId == tab.id,
             isPaneActive: shouldShowFullSaturation,
+            isSplitZoomed: splitViewController.zoomedPaneId == pane.id,
             onSelect: {
                 withAnimation(.easeInOut(duration: TabBarMetrics.selectionDuration)) {
                     pane.selectTab(tab.id)
@@ -174,6 +175,10 @@ struct TabBarView: View {
                 withAnimation(.easeInOut(duration: TabBarMetrics.closeDuration)) {
                     _ = controller.closeTab(TabID(id: tab.id), inPane: pane.id)
                 }
+            },
+            onToggleSplitZoom: {
+                guard controller.toggleZoomedPane(pane.id) else { return }
+                controller.focusPane(pane.id)
             }
         )
         .onDrag {

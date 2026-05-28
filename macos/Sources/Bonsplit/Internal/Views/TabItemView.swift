@@ -9,8 +9,10 @@ struct TabItemView: View {
     /// When false, the accent indicator desaturates to signal the unfocused
     /// state without affecting the selected-tab background fill.
     var isPaneActive: Bool = true
+    var isSplitZoomed: Bool = false
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onToggleSplitZoom: () -> Void
 
     @Environment(\.terminalBackgroundColor) private var backgroundColor
     @State private var isHovered = false
@@ -36,6 +38,8 @@ struct TabItemView: View {
                 .frame(maxWidth: TabBarMetrics.tabTitleMaxWidth, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .foregroundStyle(isSelected ? TabBarColors.activeText : TabBarColors.inactiveText)
+
+            splitZoomIndicator
 
             // Close button or dirty indicator
             closeOrDirtyIndicator
@@ -101,6 +105,27 @@ struct TabItemView: View {
                     .fill(TabBarColors.separator)
                     .frame(width: 1)
             }
+        }
+    }
+
+    // MARK: - Split Zoom Indicator
+
+    @ViewBuilder
+    private var splitZoomIndicator: some View {
+        if isSelected && isSplitZoomed {
+            Button {
+                onToggleSplitZoom()
+            } label: {
+                Image("ResetZoom")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(isPaneActive ? Color.accentColor : TabBarColors.inactiveText)
+                    .frame(width: TabBarMetrics.closeButtonSize, height: TabBarMetrics.closeButtonSize)
+            }
+            .buttonStyle(.plain)
+            .help("Reset Split Zoom")
+            .accessibilityLabel("Reset Split Zoom")
         }
     }
 

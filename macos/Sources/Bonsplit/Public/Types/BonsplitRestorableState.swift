@@ -10,16 +10,23 @@ import Foundation
 struct BonsplitRestorableState: Codable {
     let root: BonsplitRestorableNode?
     let focusedPaneId: PaneID?
+    let zoomedPaneId: PaneID?
 
-    init(root: BonsplitRestorableNode?, focusedPaneId: PaneID?) {
+    init(
+        root: BonsplitRestorableNode?,
+        focusedPaneId: PaneID?,
+        zoomedPaneId: PaneID? = nil
+    ) {
         self.root = root
         self.focusedPaneId = focusedPaneId
+        self.zoomedPaneId = zoomedPaneId
     }
 
     @MainActor
     init(controller: BonsplitController) {
         self.root = controller.internalController.rootNode.map(BonsplitRestorableNode.init(node:))
         self.focusedPaneId = controller.focusedPaneId
+        self.zoomedPaneId = controller.zoomedPaneId
     }
 }
 
@@ -168,6 +175,13 @@ extension BonsplitController {
             internalController.focusedPaneId = focusedPaneId
         } else {
             internalController.focusedPaneId = internalController.rootNode?.allPaneIds.first
+        }
+
+        if let zoomedPaneId = state.zoomedPaneId,
+           internalController.canToggleZoomedPane(zoomedPaneId) {
+            internalController.zoomedPaneId = zoomedPaneId
+        } else {
+            internalController.zoomedPaneId = nil
         }
     }
 }

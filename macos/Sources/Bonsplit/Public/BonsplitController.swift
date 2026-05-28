@@ -138,7 +138,7 @@ public final class BonsplitController {
         guard let (pane, tabIndex) = findTabInternal(tabId) else { return false }
         return closeTab(tabId, with: tabIndex, in: pane)
     }
-    
+
     /// Close a tab by ID in a specific pane.
     /// - Parameter tabId: The tab to close
     /// - Parameter paneId: The pane in which to close the tab
@@ -147,10 +147,10 @@ public final class BonsplitController {
               let tabIndex = pane.tabs.firstIndex(where: { $0.id == tabId.id }) else {
             return false
         }
-        
+
         return closeTab(tabId, with: tabIndex, in: pane)
     }
-    
+
     /// Internal helper to close a tab given its index in a pane
     /// - Parameter tabId: The tab to close
     /// - Parameter tabIndex: The position of the tab within the pane
@@ -213,6 +213,69 @@ public final class BonsplitController {
     }
 
     // MARK: - Split Operations
+
+    /// Whether the controller currently has more than one pane.
+    public var isSplit: Bool {
+        internalController.isSplit
+    }
+
+    /// The pane currently zoomed to occupy the split area, if any.
+    public var zoomedPaneId: PaneID? {
+        internalController.zoomedPaneId
+    }
+
+    public func canToggleZoomedPane(_ paneId: PaneID? = nil) -> Bool {
+        internalController.canToggleZoomedPane(paneId)
+    }
+
+    @discardableResult
+    public func toggleZoomedPane(_ paneId: PaneID? = nil) -> Bool {
+        let previousFocusedPaneId = focusedPaneId
+        guard internalController.toggleZoomedPane(paneId) else { return false }
+
+        if let focusedPaneId,
+           focusedPaneId != previousFocusedPaneId {
+            delegate?.splitTabBar(self, didFocusPane: focusedPaneId)
+        }
+        notifyGeometryChange()
+        return true
+    }
+
+    public var canEqualizeSplits: Bool {
+        internalController.canEqualizeSplits()
+    }
+
+    @discardableResult
+    public func equalizeSplits() -> Bool {
+        guard internalController.equalizeSplits() else { return false }
+        notifyGeometryChange()
+        return true
+    }
+
+    public func canResizeSplit(
+        containing paneId: PaneID? = nil,
+        direction: NavigationDirection
+    ) -> Bool {
+        guard let paneId = paneId ?? focusedPaneId else { return false }
+        return internalController.canResizeSplit(containing: paneId, direction: direction)
+    }
+
+    @discardableResult
+    public func resizeSplit(
+        containing paneId: PaneID? = nil,
+        direction: NavigationDirection,
+        amount: UInt16
+    ) -> Bool {
+        guard let paneId = paneId ?? focusedPaneId else { return false }
+        guard internalController.resizeSplit(
+            containing: paneId,
+            direction: direction,
+            amount: amount
+        ) else { return false }
+
+        notifyGeometryChange()
+        return true
+    }
 
     /// Split the focused pane (or specified pane)
     /// - Parameters:
@@ -312,28 +375,28 @@ public final class BonsplitController {
             // as it animates between states.
             var transaction = Transaction()
             transaction.disablesAnimations = true
-            
+
             withTransaction(transaction) {
                 // 1. Split creates a new empty pane
                 internalController.splitPane(targetPaneId, orientation: orientation, with: nil, insertFirst: insertFirst)
             }
-            
+
             guard let newPaneId = internalController.focusedPaneId,
                   let newPane = internalController.rootNode?.findPane(newPaneId) else {
                 return nil
             }
-            
+
             withTransaction(transaction) {
                 // 2. Move the dragged tab from source to new pane
                 sourcePane.removeTab(tab.id.id)
                 newPane.addTab(internalTab)
                 newPane.selectTab(tab.id.id)
             }
-            
+
             // 3. Focus the new pane (where the dragged tab went)
             delegate?.splitTabBar(self, didFocusPane: newPaneId)
             delegate?.splitTabBar(self, didSelectTab: tab, inPane: newPaneId)
-            
+
             // 4. Only create a new terminal in the original pane if it's now empty.
             //    If it still has other tabs, they remain and we don't need a new terminal.
             if sourcePane.tabs.isEmpty {
@@ -343,7 +406,7 @@ public final class BonsplitController {
                     self.delegate?.splitTabBar(self, didSplitPane: newPaneId, newPane: emptyPaneId, orientation: orientation)
                 }
             }
-            
+
             return newPaneId
         } else {
             // Different panes: close empty source first (if applicable),
@@ -351,39 +414,39 @@ public final class BonsplitController {
             // structural changes that confuse SwiftUI.
             sourcePane.removeTab(tab.id.id)
             let sourceWillClose = sourcePane.tabs.isEmpty
-            
+
             // Close source pane BEFORE the split so there's only one
             // structural change to the tree
             if sourceWillClose {
                 internalController.closePane(sourcePaneId)
                 delegate?.splitTabBar(self, didClosePane: sourcePaneId)
             }
-            
+
             internalController.splitPaneWithTab(
                 targetPaneId,
                 orientation: orientation,
                 tab: internalTab,
                 insertFirst: insertFirst
             )
-            
+
             guard let newPaneId = focusedPaneId else { return nil }
-            
+
             // Fire delegate callbacks
             delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
             delegate?.splitTabBar(self, didFocusPane: newPaneId)
             delegate?.splitTabBar(self, didSelectTab: tab, inPane: newPaneId)
-            
+
             // Fire didClosePane for any other panes that were removed
             let panesAfter = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
             for removed in panesBefore.subtracting(panesAfter) where removed != sourcePaneId.id {
                 delegate?.splitTabBar(self, didClosePane: PaneID(id: removed))
             }
-            
+
             // Notify geometry change after a brief delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.notifyGeometryChange()
             }
-            
+
             return newPaneId
         }
     }

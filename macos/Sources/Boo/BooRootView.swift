@@ -18,19 +18,36 @@ struct BooRootView: View {
         // Debug build warning now lives in the titlebar as a pill
         // (see `BooDebugPill` / `BooController.configureWindow`). The old
         // inline banner used to sit above the Bonsplit view here.
-        HStack(spacing: 0) {
-            if state.isWorkspaceSidebarVisible {
-                BooWorkspaceSidebar(state: state)
+        ZStack {
+            HStack(spacing: 0) {
+                if state.isWorkspaceSidebarVisible {
+                    BooWorkspaceSidebar(state: state)
+                }
+
+                ZStack {
+                    ForEach(state.workspaces.filter { state.isWorkspaceMounted($0.id) }) { workspace in
+                        workspaceView(workspace)
+                            .opacity(workspace.id == state.activeWorkspaceId ? 1 : 0)
+                            .allowsHitTesting(workspace.id == state.activeWorkspaceId)
+                            .accessibilityHidden(workspace.id != state.activeWorkspaceId)
+                            .zIndex(workspace.id == state.activeWorkspaceId ? 1 : 0)
+                    }
+                }
             }
 
-            ZStack {
-                ForEach(state.workspaces.filter { state.isWorkspaceMounted($0.id) }) { workspace in
-                    workspaceView(workspace)
-                        .opacity(workspace.id == state.activeWorkspaceId ? 1 : 0)
-                        .allowsHitTesting(workspace.id == state.activeWorkspaceId)
-                        .accessibilityHidden(workspace.id != state.activeWorkspaceId)
-                        .zIndex(workspace.id == state.activeWorkspaceId ? 1 : 0)
-                }
+            if let surface = state.commandPaletteSurface {
+                TerminalCommandPaletteView(
+                    surfaceView: surface,
+                    isPresented: $state.commandPaletteIsShowing,
+                    ghosttyConfig: state.ghostty.config,
+                    updateViewModel: (NSApp.delegate as? AppDelegate)?.updateViewModel,
+                    onDismiss: {
+                        state.commandPaletteDidDismiss(representedSurface: surface)
+                    },
+                    onAction: { action in
+                        state.performCommandPaletteAction(action, on: surface)
+                    }
+                )
             }
         // No outer click-to-focus gesture here. Surface clicks are handled
         // by AppKit at the real terminal NSView level, and Boo syncs Bonsplit

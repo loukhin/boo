@@ -15,6 +15,9 @@ struct TerminalCommandPaletteView: View {
     /// The update view model for showing update commands.
     var updateViewModel: UpdateViewModel?
 
+    /// The callback when the palette is dismissed.
+    var onDismiss: (() -> Void)?
+
     /// The callback when an action is submitted.
     var onAction: ((String) -> Void)
 
@@ -49,7 +52,11 @@ struct TerminalCommandPaletteView: View {
                 // Has to be on queue because onChange happens on a user-interactive
                 // thread and Xcode is mad about this call on that.
                 DispatchQueue.main.async {
-                    surfaceView.window?.makeFirstResponder(surfaceView)
+                    if let onDismiss {
+                        onDismiss()
+                    } else {
+                        surfaceView.window?.makeFirstResponder(surfaceView)
+                    }
                 }
             }
         }
@@ -92,7 +99,8 @@ struct TerminalCommandPaletteView: View {
         // convey it'll go all the way through.
         let title: String
         if case .updateAvailable = updateViewModel.state {
-            title = "Update Ghostty and Restart"
+            let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Ghostty"
+            title = "Update \(appName) and Restart"
         } else {
             title = updateViewModel.text
         }
@@ -136,6 +144,10 @@ struct TerminalCommandPaletteView: View {
 
     /// Commands for jumping to other terminal surfaces.
     private var jumpOptions: [CommandOption] {
+        nativeJumpOptions + booJumpOptions
+    }
+
+    private var nativeJumpOptions: [CommandOption] {
         TerminalController.all.flatMap { controller -> [CommandOption] in
             guard let window = controller.window else { return [] }
 
@@ -169,6 +181,24 @@ struct TerminalCommandPaletteView: View {
                     NotificationCenter.default.post(
                         name: Ghostty.Notification.ghosttyPresentTerminal,
                         object: surface
+                    )
+                }
+            }
+        }
+    }
+
+    private var booJumpOptions: [CommandOption] {
+        BooController.all.flatMap { controller in
+            controller.state.commandPaletteSurfaceEntries().map { entry in
+                CommandOption(
+                    title: "Focus: \(entry.title)",
+                    subtitle: entry.subtitle,
+                    leadingIcon: "rectangle.on.rectangle",
+                    sortKey: AnySortKey(ObjectIdentifier(entry.surface))
+                ) {
+                    NotificationCenter.default.post(
+                        name: Ghostty.Notification.ghosttyPresentTerminal,
+                        object: entry.surface
                     )
                 }
             }

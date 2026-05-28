@@ -643,8 +643,14 @@ extension Ghostty {
         }
 
         private func localEventLeftMouseDown(_ event: NSEvent) -> NSEvent? {
-            let isCommandPaletteVisible = (event.window?.windowController as? BaseTerminalController)?
-                .commandPaletteIsShowing == true
+            let isCommandPaletteVisible: Bool
+            if let controller = event.window?.windowController as? BaseTerminalController {
+                isCommandPaletteVisible = controller.commandPaletteIsShowing
+            } else if let controller = event.window?.windowController as? BooController {
+                isCommandPaletteVisible = controller.state.commandPaletteIsShowing
+            } else {
+                isCommandPaletteVisible = false
+            }
             guard !isCommandPaletteVisible else {
                 // We don't want to process events that
                 // are supposed to be handled by CommandPaletteView
@@ -1615,6 +1621,33 @@ extension Ghostty {
             item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
 
             menu.addItem(.separator())
+            item = menu.addItem(withTitle: "Toggle Split Zoom", action: #selector(toggleSplitZoom(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "arrow.up.left.and.arrow.down.right")
+            item = menu.addItem(withTitle: "Equalize Splits", action: #selector(equalizeSplits(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "inset.filled.topleft.topright.bottomleft.bottomright.rectangle")
+
+            let resizeMenu = NSMenu()
+            item = resizeMenu.addItem(withTitle: "Move Divider Up", action: #selector(resizeSplitUp(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "arrow.up.to.line")
+            item = resizeMenu.addItem(withTitle: "Move Divider Down", action: #selector(resizeSplitDown(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "arrow.down.to.line")
+            item = resizeMenu.addItem(withTitle: "Move Divider Left", action: #selector(resizeSplitLeft(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "arrow.left.to.line")
+            item = resizeMenu.addItem(withTitle: "Move Divider Right", action: #selector(resizeSplitRight(_:)), keyEquivalent: "")
+            item.target = self
+            item.setImageIfDesired(systemSymbolName: "arrow.right.to.line")
+
+            let resizeMenuItem = NSMenuItem(title: "Resize Split Divider", action: nil, keyEquivalent: "")
+            resizeMenuItem.submenu = resizeMenu
+            resizeMenuItem.setImageIfDesired(systemSymbolName: "arrow.left.and.right")
+            menu.addItem(resizeMenuItem)
+
+            menu.addItem(.separator())
             item = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "arrow.trianglehead.2.clockwise")
             item = menu.addItem(withTitle: "Toggle Terminal Inspector", action: #selector(toggleTerminalInspector(_:)), keyEquivalent: "")
@@ -1738,6 +1771,37 @@ extension Ghostty {
         @IBAction func splitUp(_ sender: Any) {
             guard let surface = self.surface else { return }
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_UP)
+        }
+
+        @objc func toggleSplitZoom(_ sender: Any?) {
+            performBindingAction("toggle_split_zoom")
+        }
+
+        @objc func equalizeSplits(_ sender: Any?) {
+            performBindingAction("equalize_splits")
+        }
+
+        @objc func resizeSplitUp(_ sender: Any?) {
+            performBindingAction("resize_split:up,10")
+        }
+
+        @objc func resizeSplitDown(_ sender: Any?) {
+            performBindingAction("resize_split:down,10")
+        }
+
+        @objc func resizeSplitLeft(_ sender: Any?) {
+            performBindingAction("resize_split:left,10")
+        }
+
+        @objc func resizeSplitRight(_ sender: Any?) {
+            performBindingAction("resize_split:right,10")
+        }
+
+        private func performBindingAction(_ action: String) {
+            guard let surface = self.surface else { return }
+            if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+                AppDelegate.logger.warning("action failed action=\(action)")
+            }
         }
 
         @objc func resetTerminal(_ sender: Any) {
@@ -2218,6 +2282,24 @@ extension Ghostty.SurfaceView: NSMenuItemValidation {
             item.state = readonly ? .on : .off
             return true
 
+        case #selector(toggleSplitZoom(_:)):
+            return canToggleSplitZoomFromContext()
+
+        case #selector(equalizeSplits(_:)):
+            return canEqualizeSplitsFromContext()
+
+        case #selector(resizeSplitUp(_:)):
+            return canResizeSplitFromContext(direction: .up)
+
+        case #selector(resizeSplitDown(_:)):
+            return canResizeSplitFromContext(direction: .down)
+
+        case #selector(resizeSplitLeft(_:)):
+            return canResizeSplitFromContext(direction: .left)
+
+        case #selector(resizeSplitRight(_:)):
+            return canResizeSplitFromContext(direction: .right)
+
         case #selector(copy(_:)):
             // We only enable copy menu item when there're actual selected text
             if let text = self.accessibilitySelectedText(), text.count > 0 {
@@ -2229,6 +2311,42 @@ extension Ghostty.SurfaceView: NSMenuItemValidation {
         default:
             return true
         }
+    }
+
+    private func canToggleSplitZoomFromContext() -> Bool {
+        if let controller = window?.windowController as? BaseTerminalController {
+            return controller.surfaceTree.contains(self) && controller.surfaceTree.isSplit
+        }
+
+        if let controller = window?.windowController as? BooController {
+            return controller.state.canToggleSplitZoom(for: self)
+        }
+
+        return false
+    }
+
+    private func canEqualizeSplitsFromContext() -> Bool {
+        if let controller = window?.windowController as? BaseTerminalController {
+            return controller.surfaceTree.contains(self) && controller.surfaceTree.isSplit
+        }
+
+        if let controller = window?.windowController as? BooController {
+            return controller.state.canEqualizeSplits(for: self)
+        }
+
+        return false
+    }
+
+    private func canResizeSplitFromContext(direction: NavigationDirection) -> Bool {
+        if let controller = window?.windowController as? BaseTerminalController {
+            return controller.surfaceTree.contains(self) && controller.surfaceTree.isSplit
+        }
+
+        if let controller = window?.windowController as? BooController {
+            return controller.state.canResizeSplit(for: self, direction: direction)
+        }
+
+        return false
     }
 }
 

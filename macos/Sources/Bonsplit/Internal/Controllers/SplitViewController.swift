@@ -12,6 +12,9 @@ final class SplitViewController {
     /// Currently focused pane ID
     var focusedPaneId: PaneID?
 
+    /// Pane currently zoomed to occupy the full split area.
+    var zoomedPaneId: PaneID?
+
     /// Tab currently being dragged (for visual feedback)
     var draggingTab: TabItem?
 
@@ -36,6 +39,110 @@ final class SplitViewController {
     init(rootNode: SplitNode? = nil) {
         self.rootNode = rootNode
         self.focusedPaneId = rootNode?.allPaneIds.first
+    }
+
+    var isSplit: Bool {
+        guard let rootNode,
+              case .split = rootNode else { return false }
+        return true
+    }
+
+    var visibleRootNode: SplitNode? {
+        if let zoomedPaneId,
+           let pane = rootNode?.findPane(zoomedPaneId) {
+            return .pane(pane)
+        }
+
+        return rootNode
+    }
+
+    func canToggleZoomedPane(_ paneId: PaneID? = nil) -> Bool {
+        guard isSplit,
+              let paneId = paneId ?? focusedPaneId else { return false }
+        return rootNode?.findPane(paneId) != nil
+    }
+
+    @discardableResult
+    func toggleZoomedPane(_ paneId: PaneID? = nil) -> Bool {
+        guard let paneId = paneId ?? focusedPaneId,
+              canToggleZoomedPane(paneId) else { return false }
+
+        if zoomedPaneId == paneId {
+            zoomedPaneId = nil
+        } else {
+            zoomedPaneId = paneId
+            focusedPaneId = paneId
+        }
+
+        return true
+    }
+
+    func canEqualizeSplits() -> Bool {
+        isSplit
+    }
+
+    @discardableResult
+    func equalizeSplits() -> Bool {
+        guard let rootNode,
+              canEqualizeSplits() else { return false }
+
+        _ = equalizeNode(rootNode)
+        return true
+    }
+
+    func canResizeSplit(
+        containing paneId: PaneID,
+        direction: NavigationDirection
+    ) -> Bool {
+        guard let rootNode else { return false }
+        return resizeTarget(
+            in: rootNode,
+            containing: paneId,
+            direction: direction,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            current: nil
+        ) != nil
+    }
+
+    @discardableResult
+    func resizeSplit(
+        containing paneId: PaneID,
+        direction: NavigationDirection,
+        amount: UInt16
+    ) -> Bool {
+        guard let rootNode else { return false }
+        guard let target = resizeTarget(
+            in: rootNode,
+            containing: paneId,
+            direction: direction,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            current: nil
+        ) else { return false }
+
+        let containerSize = containerFrame.size
+        let targetLength: CGFloat
+        switch target.split.orientation {
+        case .horizontal:
+            targetLength = max(1, target.bounds.width * max(1, containerSize.width))
+        case .vertical:
+            targetLength = max(1, target.bounds.height * max(1, containerSize.height))
+        }
+
+        let delta = CGFloat(amount) / targetLength
+        let oldPosition = target.split.dividerPosition
+        let newPosition: CGFloat
+        switch (target.split.orientation, direction) {
+        case (.horizontal, .left), (.vertical, .up):
+            newPosition = oldPosition - delta
+        case (.horizontal, .right), (.vertical, .down):
+            newPosition = oldPosition + delta
+        default:
+            return false
+        }
+
+        target.split.dividerPosition = Self.clampDividerPosition(newPosition)
+        zoomedPaneId = nil
+        return target.split.dividerPosition != oldPosition
     }
 
     // MARK: - Focus Management
@@ -213,7 +320,8 @@ final class SplitViewController {
         let (newRoot, siblingPaneId) = closePaneRecursively(node: currentRoot, targetPaneId: paneId)
 
         rootNode = newRoot
-        
+        clearInvalidZoomedPane()
+
         // Only change focusedPaneId if we're closing the currently focused pane.
         // Otherwise, keep the existing focus (e.g., after a tab move, the target
         // pane should stay focused even when the empty source pane closes).
@@ -457,6 +565,141 @@ final class SplitViewController {
             }
             return findSplitRecursively(in: splitState.second, id: id)
         }
+    }
+
+    private struct ResizeTarget {
+        let split: SplitState
+        let bounds: CGRect
+    }
+
+    private func equalizeNode(_ node: SplitNode) -> Int {
+        switch node {
+        case .pane:
+            return 1
+
+        case .split(let splitState):
+            let firstWeight = weight(splitState.first, matching: splitState.orientation)
+            let secondWeight = weight(splitState.second, matching: splitState.orientation)
+            let totalWeight = max(1, firstWeight + secondWeight)
+
+            splitState.dividerPosition = CGFloat(firstWeight) / CGFloat(totalWeight)
+            _ = equalizeNode(splitState.first)
+            _ = equalizeNode(splitState.second)
+            return totalWeight
+        }
+    }
+
+    private func weight(_ node: SplitNode, matching orientation: SplitOrientation) -> Int {
+        switch node {
+        case .pane:
+            return 1
+
+        case .split(let splitState):
+            if splitState.orientation == orientation {
+                return weight(splitState.first, matching: orientation)
+                    + weight(splitState.second, matching: orientation)
+            }
+            return 1
+        }
+    }
+
+    private func resizeTarget(
+        in node: SplitNode,
+        containing paneId: PaneID,
+        direction: NavigationDirection,
+        bounds: CGRect,
+        current: ResizeTarget?
+    ) -> ResizeTarget? {
+        switch node {
+        case .pane(let pane):
+            return pane.id == paneId ? current : nil
+
+        case .split(let splitState):
+            let candidate = splitState.orientation == Self.resizeOrientation(for: direction)
+                ? ResizeTarget(split: splitState, bounds: bounds)
+                : current
+            let childBounds = Self.childBounds(for: splitState, in: bounds)
+
+            if splitState.first.findPane(paneId) != nil {
+                return resizeTarget(
+                    in: splitState.first,
+                    containing: paneId,
+                    direction: direction,
+                    bounds: childBounds.first,
+                    current: candidate
+                )
+            }
+
+            if splitState.second.findPane(paneId) != nil {
+                return resizeTarget(
+                    in: splitState.second,
+                    containing: paneId,
+                    direction: direction,
+                    bounds: childBounds.second,
+                    current: candidate
+                )
+            }
+
+            return nil
+        }
+    }
+
+    private static func resizeOrientation(for direction: NavigationDirection) -> SplitOrientation {
+        switch direction {
+        case .left, .right:
+            return .horizontal
+        case .up, .down:
+            return .vertical
+        }
+    }
+
+    private static func childBounds(
+        for splitState: SplitState,
+        in bounds: CGRect
+    ) -> (first: CGRect, second: CGRect) {
+        switch splitState.orientation {
+        case .horizontal:
+            return (
+                first: CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY,
+                    width: bounds.width * splitState.dividerPosition,
+                    height: bounds.height
+                ),
+                second: CGRect(
+                    x: bounds.minX + bounds.width * splitState.dividerPosition,
+                    y: bounds.minY,
+                    width: bounds.width * (1 - splitState.dividerPosition),
+                    height: bounds.height
+                )
+            )
+
+        case .vertical:
+            return (
+                first: CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY,
+                    width: bounds.width,
+                    height: bounds.height * splitState.dividerPosition
+                ),
+                second: CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY + bounds.height * splitState.dividerPosition,
+                    width: bounds.width,
+                    height: bounds.height * (1 - splitState.dividerPosition)
+                )
+            )
+        }
+    }
+
+    private static func clampDividerPosition(_ position: CGFloat) -> CGFloat {
+        min(max(position, 0.1), 0.9)
+    }
+
+    private func clearInvalidZoomedPane() {
+        guard let zoomedPaneId,
+              rootNode?.findPane(zoomedPaneId) == nil else { return }
+        self.zoomedPaneId = nil
     }
 
     /// Get all split states in the tree
