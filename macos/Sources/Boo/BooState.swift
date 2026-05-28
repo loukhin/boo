@@ -167,13 +167,27 @@ final class BooState: ObservableObject {
         activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
     }
 
-    private func makeWorkspaceController() -> BonsplitController {
+    /// Init from AppKit restoration state.
+    init(ghostty: Ghostty.App, restorableState: BooRestorableState) {
+        self.ghostty = ghostty
+        self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: ghostty.config)
+        self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: ghostty.config)
+
+        subscribeToGhosttyNotifications()
+        restore(from: restorableState)
+    }
+
+    private func makeWorkspaceController(restoring state: BonsplitRestorableState? = nil) -> BonsplitController {
         let config = BonsplitConfiguration(
             allowSplits: true,
             allowCloseTabs: true,
             contentViewLifecycle: .keepAllAlive
         )
-        let controller = BonsplitController(configuration: config)
+        let controller = if let state {
+            BonsplitController(configuration: config, restoring: state)
+        } else {
+            BonsplitController(configuration: config)
+        }
         controller.delegate = self
         setupTabDragOutCallback(for: controller)
         return controller
@@ -220,6 +234,63 @@ final class BooState: ObservableObject {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - Restoration
+
+    private func restore(from state: BooRestorableState) {
+        for workspaceState in state.workspaces {
+            guard let workspace = restoreWorkspace(from: workspaceState) else { continue }
+            workspaces.append(workspace)
+        }
+
+        if workspaces.isEmpty || surfaces.isEmpty {
+            workspaces.removeAll()
+            surfaces.removeAll()
+            surfaceSubscriptions.removeAll()
+            let workspaceId = createWorkspace()
+            activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
+            return
+        }
+
+        if let activeId = state.activeWorkspaceId,
+           workspaces.contains(where: { $0.id.id == activeId }) {
+            activeWorkspaceId = WorkspaceID(id: activeId)
+        } else {
+            activeWorkspaceId = workspaces.first?.id
+        }
+
+        isWorkspaceSidebarVisible = state.isWorkspaceSidebarVisible
+        focusedOwnedSurface = surface(withId: state.focusedSurfaceId)
+        refreshMountedWorkspaces(keeping: activeWorkspaceId.map { Set([$0]) } ?? [])
+        updateWindowChromeTabId()
+    }
+
+    private func restoreWorkspace(from state: BooWorkspaceRestorableState) -> BooWorkspace? {
+        let controller = makeWorkspaceController(restoring: state.bonsplit)
+        let validTabIds = Set(controller.allTabIds)
+        guard !validTabIds.isEmpty else { return nil }
+
+        let workspace = BooWorkspace(
+            id: WorkspaceID(id: state.id),
+            controller: controller,
+            title: state.title,
+            customTitle: state.customTitle
+        )
+
+        for surfaceState in state.surfaces where validTabIds.contains(surfaceState.tabId) {
+            guard surfaces[surfaceState.tabId] == nil else { continue }
+            registerSurface(surfaceState.surface, forTab: surfaceState.tabId)
+        }
+
+        let restoredSurfaceIds = Set(surfaces.keys)
+        let workspaceHasSurface = validTabIds.contains { restoredSurfaceIds.contains($0) }
+        return workspaceHasSurface ? workspace : nil
+    }
+
+    private func surface(withId id: UUID?) -> Ghostty.SurfaceView? {
+        guard let id else { return nil }
+        return surfaces.values.first { $0.id == id }
     }
 
     // MARK: - Workspace ops
@@ -715,21 +786,25 @@ final class BooState: ObservableObject {
     /// `representedURL` alongside a non-empty title is what makes macOS
     /// draw the proxy icon; clearing both hides it.
     private func applyWindowChrome(title: String?, pwd: String?) {
-        guard let window else { return }
-
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let displayTitle = trimmed.isEmpty ? "Boo" : trimmed
-        window.title = displayTitle
-        windowChromeTitle = displayTitle
-
+        let url: URL?
         if let pwd, !pwd.isEmpty {
-            let url = URL(fileURLWithPath: pwd)
-            window.representedURL = url
-            windowChromeURL = url
+            url = URL(fileURLWithPath: pwd)
         } else {
-            window.representedURL = nil
-            windowChromeURL = nil
+            url = nil
         }
+
+        windowChromeTitle = displayTitle
+        windowChromeURL = url
+
+        guard let window else { return }
+        window.title = displayTitle
+        window.representedURL = url
+    }
+
+    func syncWindowChromeToWindow() {
+        updateWindowChromeTabId()
     }
 
     // MARK: - Split ops
@@ -1473,6 +1548,53 @@ extension BooState: BonsplitDelegate {
             focusedOwnedSurface = nil
             focusCurrentTabSurface(reason: .windowActivated)
         }
+    }
+
+    /// Restore AppKit first-responder focus after state restoration.
+    ///
+    /// AppKit asks us to recreate the window before SwiftUI has necessarily
+    /// attached every `SurfaceView` to an `NSWindow`, so this mirrors
+    /// Ghostty's bounded retry loop for restored terminal focus.
+    func restoreFocus(toSurfaceWithId id: UUID?, attempts: Int = 0) {
+        guard let target = surface(withId: id) ?? currentSelectedSurface() else { return }
+
+        let after: DispatchTime
+        if attempts == 0 {
+            after = .now()
+        } else if attempts > 40 {
+            return
+        } else {
+            after = .now() + .milliseconds(50)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: after) { [weak self, weak target] in
+            guard let self, let target else { return }
+
+            if let targetController = self.controllerContaining(surface: target),
+               let workspace = self.workspace(containing: targetController),
+               self.activeWorkspaceId != workspace.id {
+                self.activateWorkspace(.init(id: workspace.id, reason: .initialWindow))
+            }
+
+            guard let viewWindow = target.window else {
+                self.restoreFocus(toSurfaceWithId: target.id, attempts: attempts + 1)
+                return
+            }
+
+            guard let window = self.window, viewWindow == window else { return }
+
+            self.focusedOwnedSurface = target
+            viewWindow.makeFirstResponder(target)
+            if viewWindow.isKeyWindow {
+                target.focusDidChange(true)
+            }
+        }
+    }
+
+    private func currentSelectedSurface() -> Ghostty.SurfaceView? {
+        guard let paneId = controller.focusedPaneId,
+              let tab = controller.selectedTab(inPane: paneId) else { return nil }
+        return surfaces[tab.id]
     }
 
     // MARK: - Menu Action Helpers

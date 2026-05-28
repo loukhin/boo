@@ -907,9 +907,15 @@ class AppDelegate: NSObject,
 
     // MARK: - GhosttyAppDelegate
 
-    func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
+    @MainActor func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView? {
         for c in TerminalController.all {
             for view in c.surfaceTree where view.id == uuid {
+                return view
+            }
+        }
+
+        for c in BooController.all {
+            if let view = c.state.surfaces.values.first(where: { $0.id == uuid }) {
                 return view
             }
         }
@@ -1268,7 +1274,7 @@ extension AppDelegate {
             self.menuFloatOnTop?.state = .off
             return
         }
-        
+
         // Only sync for terminal windows (TerminalWindow or BooController)
         let isTerminalWindow = window is TerminalWindow || window.windowController is BooController
         guard isTerminalWindow else {

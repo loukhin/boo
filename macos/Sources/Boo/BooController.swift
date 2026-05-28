@@ -20,6 +20,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     let state: BooState
     private let ghostty: Ghostty.App
+    private let restorable: Bool
     private var keyDownMonitor: Any?
     private var isBackgroundOpaque = false
 
@@ -111,6 +112,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     init(ghostty: Ghostty.App, baseConfig: Ghostty.SurfaceConfiguration? = nil) {
         self.ghostty = ghostty
+        self.restorable = (baseConfig?.command ?? "").isEmpty
         self.state = BooState(ghostty: ghostty, baseConfig: baseConfig)
 
         let window = Self.makeWindow()
@@ -121,7 +123,19 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     /// Init with an existing surface (for drag-out-to-new-window).
     init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
         self.ghostty = ghostty
+        self.restorable = true
         self.state = BooState(ghostty: ghostty, existingSurface: existingSurface)
+
+        let window = Self.makeWindow()
+        super.init(window: window)
+        configureWindow()
+    }
+
+    /// Init from AppKit restoration state.
+    init(ghostty: Ghostty.App, restorableState: BooRestorableState) {
+        self.ghostty = ghostty
+        self.restorable = true
+        self.state = BooState(ghostty: ghostty, restorableState: restorableState)
 
         let window = Self.makeWindow()
         super.init(window: window)
@@ -171,6 +185,12 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         // Set autosave name AFTER content view to prevent SwiftUI override.
         window.setFrameAutosaveName("BooWindow")
 
+        window.isRestorable = restorable
+        if restorable {
+            window.restorationClass = BooWindowRestoration.self
+            window.identifier = BooWindowRestoration.restorationIdentifier
+        }
+
         // Apply initial window theme
         applyWindowTheme()
 
@@ -219,6 +239,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         // Let BooState know which window it lives in so it can filter
         // app-level ghostty notifications to the key window.
         state.window = window
+        state.syncWindowChromeToWindow()
 
         window.delegate = self
         BooController.all.append(self)
@@ -987,6 +1008,11 @@ extension BooController: NSWindowDelegate {
             sender?.close()
         }
         return false
+    }
+
+    func window(_ window: NSWindow, willEncodeRestorableState state: NSCoder) {
+        guard restorable else { return }
+        BooRestorableState(from: self.state).encode(with: state)
     }
 
     func windowWillClose(_ notification: Notification) {
