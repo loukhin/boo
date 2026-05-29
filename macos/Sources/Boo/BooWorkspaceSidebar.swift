@@ -184,12 +184,19 @@ struct BooWorkspaceSidebar: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(workspaceRowTextColor(for: workspace))
 
-                Text(state.workspaceDisplayPWD(workspace) ?? " ")
-                    .font(.system(size: 10))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .foregroundStyle(workspaceRowPWDColor(for: workspace))
+                HStack(alignment: .center, spacing: 4) {
+                    let bellCount = state.workspaceBellCount(workspace)
+                    if bellCount > 0 {
+                        workspaceBellBadge(count: bellCount)
+                    }
+
+                    Text(state.workspaceDisplayPWD(workspace) ?? " ")
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .foregroundStyle(workspaceRowPWDColor(for: workspace))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -240,6 +247,22 @@ struct BooWorkspaceSidebar: View {
                 state.renameWorkspace(workspace.id)
             }
         }
+    }
+
+    private func workspaceBellBadge(count: Int) -> some View {
+        let label = count > 99 ? "99+" : String(count)
+
+        return Text(label)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .monospacedDigit()
+            .lineLimit(1)
+            .foregroundStyle(Color.white)
+            .offset(y: -0.5)
+            .frame(minWidth: 16, minHeight: 16)
+            .padding(.horizontal, label.count > 1 ? 4 : 0)
+            .background(Color(nsColor: .systemRed), in: Capsule())
+            .fixedSize()
+            .accessibilityLabel("\(count) ringing \(count == 1 ? "tab" : "tabs")")
     }
 
     private func workspaceRowBackground(for workspace: BooWorkspace) -> Color {

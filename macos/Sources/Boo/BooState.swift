@@ -60,12 +60,18 @@ final class BooState: ObservableObject {
     /// One ghostty surface per Bonsplit tab. Owned here so the surface
     /// outlives any individual SwiftUI render — `Ghostty.SurfaceView` is a
     /// heavy NSView with a live PTY + child process.
-    @Published var surfaces: [TabID: Ghostty.SurfaceView] = [:]
+    @Published var surfaces: [TabID: Ghostty.SurfaceView] = [:] {
+        didSet { syncBellTabCount() }
+    }
 
-    /// Combine subscriptions that forward each surface's `$title`/`$pwd`
-    /// into the Bonsplit tab title and (when this is the focused tab) into
-    /// the hosting window's title + proxy icon. Keyed by tab id; cancelled
-    /// when the tab closes.
+    /// Number of Boo tabs in this window whose terminal bell is active.
+    /// This intentionally counts tabs/surfaces, not workspaces or windows,
+    /// because Boo workspaces replace Ghostty's native AppKit tab groups.
+    @Published private(set) var bellTabCount: Int = 0
+
+    /// Combine subscriptions that forward each surface's `$title`/`$pwd`/`$bell`
+    /// into the Bonsplit tab title, window chrome, and app-level dock badge.
+    /// Keyed by tab id; cancelled when the tab closes.
     private var surfaceSubscriptions: [TabID: Set<AnyCancellable>] = [:]
 
     /// Tab currently mirrored into the window chrome (window title + proxy
@@ -546,6 +552,22 @@ final class BooState: ObservableObject {
     func workspaceDisplayTitle(_ workspace: BooWorkspace) -> String {
         if let customTitle = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
            !customTitle.isEmpty {
+            guard let tabId = selectedTabId(in: workspace) else { return customTitle }
+            return titleWithBellPrefix(customTitle, hasBell: tabHasBell(tabId))
+        }
+
+        if let tabId = selectedTabId(in: workspace),
+           let title = workspace.controller.tab(tabId)?.title.trimmingCharacters(in: .whitespacesAndNewlines),
+           !title.isEmpty {
+            return title
+        }
+
+        return "Boo"
+    }
+
+    func workspaceBaseDisplayTitle(_ workspace: BooWorkspace) -> String {
+        if let customTitle = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !customTitle.isEmpty {
             return customTitle
         }
 
@@ -556,6 +578,31 @@ final class BooState: ObservableObject {
         }
 
         return "Boo"
+    }
+
+    func workspaceBellCount(_ workspace: BooWorkspace) -> Int {
+        workspaceBellCount(workspace, tabId: nil, hasBell: nil)
+    }
+
+    private func workspaceBellCount(
+        _ workspace: BooWorkspace,
+        tabId overrideTabId: TabID?,
+        hasBell bellOverride: Bool?
+    ) -> Int {
+        workspace.controller.allTabIds.reduce(0) { result, tabId in
+            result + (tabHasBell(tabId, overridingTabId: overrideTabId, hasBell: bellOverride) ? 1 : 0)
+        }
+    }
+
+    private func tabHasBell(
+        _ tabId: TabID,
+        overridingTabId overrideTabId: TabID? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) -> Bool {
+        if let overrideTabId, tabId == overrideTabId, let bellOverride {
+            return bellOverride
+        }
+        return surfaces[tabId]?.bell == true
     }
 
     func workspaceDisplayPWD(_ workspace: BooWorkspace) -> String? {
@@ -625,7 +672,7 @@ final class BooState: ObservableObject {
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
 
-        let textField = NSTextField(string: workspaceDisplayTitle(workspace))
+        let textField = NSTextField(string: workspaceBaseDisplayTitle(workspace))
         textField.frame = NSRect(x: 0, y: 0, width: 260, height: 24)
         alert.accessoryView = textField
 
@@ -777,6 +824,7 @@ final class BooState: ObservableObject {
         case create(config: Ghostty.SurfaceConfiguration?)
         case adopt(Ghostty.SurfaceView)
 
+        @MainActor
         var initialTitle: String {
             switch self {
             case .create:
@@ -930,7 +978,7 @@ final class BooState: ObservableObject {
             .sink { [weak self] newTitle in
                 guard let self else { return }
                 if !newTitle.isEmpty {
-                    self.controllerContaining(tabId: tabId)?.updateTab(tabId, title: newTitle)
+                    self.syncTabBellIndicator(tabId, surface: surface, title: newTitle)
                     self.objectWillChange.send()
                 }
                 if self.windowChromeTabId == tabId {
@@ -949,15 +997,134 @@ final class BooState: ObservableObject {
             }
             .store(in: &subs)
 
+        surface.$bell
+            .removeDuplicates()
+            .sink { [weak self] hasBell in
+                self?.syncTabBellIndicator(tabId, surface: surface, hasBell: hasBell)
+                self?.syncBellTabCount(tabId: tabId, hasBell: hasBell)
+                self?.syncWorkspaceBellIndicator(tabId: tabId, hasBell: hasBell)
+            }
+            .store(in: &subs)
+
         surfaceSubscriptions[tabId] = subs
+        syncTabBellIndicator(tabId, surface: surface)
+    }
+
+    // MARK: - Bell aggregation
+
+    private static let bellTitlePrefix = "🔔 "
+
+    private func syncTabBellIndicator(
+        _ tabId: TabID,
+        surface: Ghostty.SurfaceView,
+        title titleOverride: String? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) {
+        guard let controller = controllerContaining(tabId: tabId) else { return }
+        let tab = controller.tab(tabId)
+        let title = tabTitle(
+            for: surface,
+            fallbackTitle: tab?.title,
+            title: titleOverride,
+            hasBell: bellOverride
+        )
+        let iconUpdate: String?? = tab?.icon == "bell.fill" ? .some(nil) : nil
+        controller.updateTab(tabId, title: title, icon: iconUpdate)
+    }
+
+    private func tabTitle(
+        for surface: Ghostty.SurfaceView,
+        fallbackTitle: String?,
+        title titleOverride: String? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) -> String {
+        let surfaceTitle = titleOverride ?? surface.title
+        let title: String
+        if surfaceTitle.isEmpty {
+            title = Self.clearingBellTitlePrefix(from: fallbackTitle ?? "👻")
+        } else {
+            title = surfaceTitle
+        }
+        return titleWithBellPrefix(title, hasBell: bellOverride ?? surface.bell)
+    }
+
+    private func titleWithBellPrefix(_ title: String, hasBell: Bool) -> String {
+        guard hasBell && ghostty.config.bellFeatures.contains(.title) else { return title }
+        return "\(Self.bellTitlePrefix)\(title)"
+    }
+
+    static func clearingBellTitlePrefix(from title: String) -> String {
+        guard title.hasPrefix(bellTitlePrefix) else { return title }
+        return String(title.dropFirst(bellTitlePrefix.count))
+    }
+
+    private func syncBellTabCount(tabId overrideTabId: TabID? = nil, hasBell bellOverride: Bool? = nil) {
+        let count = surfaces.reduce(0) { result, entry in
+            let hasBell: Bool
+            if let overrideTabId, entry.key == overrideTabId, let bellOverride {
+                hasBell = bellOverride
+            } else {
+                hasBell = entry.value.bell
+            }
+            return result + (hasBell ? 1 : 0)
+        }
+        guard count != bellTabCount else { return }
+
+        bellTabCount = count
+        NotificationCenter.default.post(
+            name: .terminalWindowBellDidChangeNotification,
+            object: self,
+            userInfo: [Notification.Name.terminalWindowHasBellKey: count > 0]
+        )
+    }
+
+    private func syncWorkspaceBellIndicator(tabId: TabID, hasBell: Bool) {
+        objectWillChange.send()
+
+        guard activeWorkspace?.controller.allTabIds.contains(tabId) == true else { return }
+        updateWindowChromeTabId(bellOverrideTabId: tabId, hasBell: hasBell)
+    }
+
+    func notifyBellTabCountForDockBadge() {
+        NotificationCenter.default.post(
+            name: .terminalWindowBellDidChangeNotification,
+            object: self,
+            userInfo: [Notification.Name.terminalWindowHasBellKey: bellTabCount > 0]
+        )
+    }
+
+    func clearBellTabCountForWindowClose() {
+        guard bellTabCount != 0 else { return }
+
+        bellTabCount = 0
+        NotificationCenter.default.post(
+            name: .terminalWindowBellDidChangeNotification,
+            object: self,
+            userInfo: [Notification.Name.terminalWindowHasBellKey: false]
+        )
     }
 
     // MARK: - Window chrome
 
+    private func windowChromeTabHasBell(
+        tabId overrideTabId: TabID? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) -> Bool {
+        guard let windowChromeTabId else { return false }
+        return tabHasBell(
+            windowChromeTabId,
+            overridingTabId: overrideTabId,
+            hasBell: bellOverride
+        )
+    }
+
     /// Recompute which tab's title/pwd the window should mirror, based on
     /// Bonsplit's focused pane + selected tab. Call after any focus or
     /// selection change.
-    private func updateWindowChromeTabId() {
+    private func updateWindowChromeTabId(
+        bellOverrideTabId: TabID? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) {
         let newId: TabID?
         if let paneId = controller.focusedPaneId,
            let tab = controller.selectedTab(inPane: paneId) {
@@ -969,18 +1136,40 @@ final class BooState: ObservableObject {
         windowChromeTabId = newId
 
         if let newId, let surface = surfaces[newId] {
-            applyWindowChrome(title: surface.title, pwd: surface.pwd)
+            applyWindowChrome(
+                title: surface.title,
+                pwd: surface.pwd,
+                bellOverrideTabId: bellOverrideTabId,
+                hasBell: bellOverride
+            )
         } else {
-            applyWindowChrome(title: nil, pwd: nil)
+            applyWindowChrome(
+                title: nil,
+                pwd: nil,
+                bellOverrideTabId: bellOverrideTabId,
+                hasBell: bellOverride
+            )
         }
     }
 
     /// Push the computed title/pwd onto the hosting `NSWindow`. Setting
     /// `representedURL` alongside a non-empty title is what makes macOS
     /// draw the proxy icon; clearing both hides it.
-    private func applyWindowChrome(title: String?, pwd: String?) {
+    private func applyWindowChrome(
+        title: String?,
+        pwd: String?,
+        bellOverrideTabId: TabID? = nil,
+        hasBell bellOverride: Bool? = nil
+    ) {
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let displayTitle = trimmed.isEmpty ? "Boo" : trimmed
+        let baseTitle = trimmed.isEmpty ? "Boo" : trimmed
+        let displayTitle = titleWithBellPrefix(
+            baseTitle,
+            hasBell: windowChromeTabHasBell(
+                tabId: bellOverrideTabId,
+                hasBell: bellOverride
+            )
+        )
         let url: URL?
         if let pwd, !pwd.isEmpty {
             url = URL(fileURLWithPath: pwd)
@@ -1095,6 +1284,7 @@ final class BooState: ObservableObject {
             (Ghostty.Notification.ghosttyPresentTerminal, #selector(onGhosttyPresentTerminal(_:))),
             (Ghostty.Notification.ghosttyFocusSplit, #selector(onGhosttyFocusSplit(_:))),
             (Ghostty.Notification.ghosttyGotoTab, #selector(onGhosttyGotoTab(_:))),
+            (.ghosttyBellDidRing, #selector(onGhosttyBellDidRing(_:))),
             (.ghosttySurfaceFocusDidChange, #selector(onGhosttySurfaceFocusDidChange(_:))),
             (.ghosttyConfigDidChange, #selector(onGhosttyConfigDidChange(_:)))
         ]
@@ -1158,12 +1348,32 @@ final class BooState: ObservableObject {
         return controller
     }
 
+    @objc private func onGhosttyBellDidRing(_ note: Notification) {
+        guard let route = surfaceRoute(for: note) else { return }
+
+        // SurfaceView owns the actual bell mutation for Ghostty parity. Hop one
+        // turn so its `.ghosttyBellDidRing` observer has set `surface.bell` by
+        // the time Boo mirrors the state into Bonsplit tab chrome and the dock
+        // badge aggregate.
+        DispatchQueue.main.async { [weak self, surface = route.surface, tabId = route.tabId] in
+            guard let self, self.surfaces[tabId] === surface else { return }
+            self.syncTabBellIndicator(tabId, surface: surface)
+            self.syncBellTabCount()
+            self.syncWorkspaceBellIndicator(tabId: tabId, hasBell: surface.bell)
+        }
+    }
+
     @objc private func onGhosttyConfigDidChange(_ note: Notification) {
         // Update background color from new config.
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: self.ghostty.config)
             self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: self.ghostty.config)
+            for (tabId, surface) in self.surfaces {
+                self.syncTabBellIndicator(tabId, surface: surface)
+            }
+            self.objectWillChange.send()
+            self.updateWindowChromeTabId()
         }
     }
 

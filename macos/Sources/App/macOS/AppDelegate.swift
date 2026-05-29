@@ -667,10 +667,17 @@ class AppDelegate: NSObject,
             // Bounce the dock icon if we're not focused.
             NSApp.requestUserAttention(.informationalRequest)
         }
+
+        // Terminal/Boo controllers aggregate bell state from their surfaces.
+        // Defer badge sync one turn so surface-level bell observers have run.
+        DispatchQueue.main.async { [weak self] in
+            self?.syncDockBadge()
+        }
     }
 
     @objc private func terminalWindowHasBell(_ notification: Notification) {
-        guard notification.object is BaseTerminalController else { return }
+        guard notification.object is BaseTerminalController ||
+              notification.object is BooState else { return }
         syncDockBadge()
     }
 
@@ -683,7 +690,7 @@ class AppDelegate: NSObject,
 
             // Permission granted, set the badge
             if granted {
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     self.setDockBadge()
                 }
             }
@@ -697,7 +704,7 @@ class AppDelegate: NSObject,
             case .authorized:
                 // If we're authorized and allow badges, then set the badge.
                 if settings.badgeSetting == .enabled {
-                    DispatchQueue.main.async {
+                    Task { @MainActor in
                         self.setDockBadge()
                     }
                 } else if settings.badgeSetting == .notSupported {
@@ -743,10 +750,14 @@ class AppDelegate: NSObject,
         _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
     }
 
-    private func setDockBadge() {
-        let bellCount = NSApp.windows
+    @MainActor private func setDockBadge() {
+        let ghosttyBellCount = NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
+        let booBellCount = BooController.all.reduce(0) { count, controller in
+            count + controller.state.surfaces.values.reduce(0) { $0 + ($1.bell ? 1 : 0) }
+        }
+        let bellCount = ghosttyBellCount + booBellCount
         let wantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
         let label = wantsBadge ? (bellCount > 99 ? "99+" : String(bellCount)) : nil
         NSApp.dockTile.badgeLabel = label

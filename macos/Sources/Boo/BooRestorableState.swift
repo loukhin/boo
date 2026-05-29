@@ -78,17 +78,112 @@ struct BooWorkspaceRestorableState: Codable {
         self.id = workspace.id.id
         self.title = workspace.title
         self.customTitle = workspace.customTitle
-        self.bonsplit = workspace.controller.restorableState()
+        self.bonsplit = workspace.controller.restorableState().clearingTransientBooBellIndicators()
         self.surfaces = workspace.controller.allTabIds.compactMap { tabId in
             guard let surface = state.surfaces[tabId] else { return nil }
             return BooSurfaceRestorableState(tabId: tabId, surface: surface)
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case customTitle
+        case bonsplit
+        case surfaces
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.customTitle = try container.decodeIfPresent(String.self, forKey: .customTitle)
+        self.bonsplit = try container.decode(
+            BonsplitRestorableState.self,
+            forKey: .bonsplit
+        ).clearingTransientBooBellIndicators()
+        self.surfaces = try container.decode([BooSurfaceRestorableState].self, forKey: .surfaces)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encodeIfPresent(customTitle, forKey: .customTitle)
+        try container.encode(bonsplit.clearingTransientBooBellIndicators(), forKey: .bonsplit)
+        try container.encode(surfaces, forKey: .surfaces)
     }
 }
 
 struct BooSurfaceRestorableState: Codable {
     let tabId: TabID
     let surface: Ghostty.SurfaceView
+}
+
+private let booTransientBellTabIcon = "bell.fill"
+private let booTransientBellTitlePrefix = "🔔 "
+
+private func clearingTransientBooBellTitlePrefix(from title: String) -> String {
+    guard title.hasPrefix(booTransientBellTitlePrefix) else { return title }
+    return String(title.dropFirst(booTransientBellTitlePrefix.count))
+}
+
+private extension BonsplitRestorableState {
+    func clearingTransientBooBellIndicators() -> BonsplitRestorableState {
+        BonsplitRestorableState(
+            root: root?.clearingTransientBooBellIndicators(),
+            focusedPaneId: focusedPaneId,
+            zoomedPaneId: zoomedPaneId
+        )
+    }
+}
+
+private extension BonsplitRestorableNode {
+    func clearingTransientBooBellIndicators() -> BonsplitRestorableNode {
+        switch self {
+        case .pane(let pane):
+            return .pane(pane.clearingTransientBooBellIndicators())
+
+        case .split(let split):
+            return .split(split.clearingTransientBooBellIndicators())
+        }
+    }
+}
+
+private extension BonsplitRestorablePane {
+    func clearingTransientBooBellIndicators() -> BonsplitRestorablePane {
+        BonsplitRestorablePane(
+            id: id,
+            tabs: tabs.map { $0.clearingTransientBooBellIndicators() },
+            selectedTabId: selectedTabId
+        )
+    }
+}
+
+private extension BonsplitRestorableSplit {
+    func clearingTransientBooBellIndicators() -> BonsplitRestorableSplit {
+        BonsplitRestorableSplit(
+            id: id,
+            orientation: orientation,
+            dividerPosition: dividerPosition,
+            first: first.clearingTransientBooBellIndicators(),
+            second: second.clearingTransientBooBellIndicators()
+        )
+    }
+}
+
+private extension BonsplitRestorableTab {
+    func clearingTransientBooBellIndicators() -> BonsplitRestorableTab {
+        let sanitizedIcon = icon == booTransientBellTabIcon ? nil : icon
+        let sanitizedTitle = clearingTransientBooBellTitlePrefix(from: title)
+        guard sanitizedIcon != icon || sanitizedTitle != title else { return self }
+        return BonsplitRestorableTab(
+            id: id,
+            title: sanitizedTitle,
+            icon: sanitizedIcon,
+            isDirty: isDirty
+        )
+    }
 }
 
 final class BooWindowRestoration: NSObject, NSWindowRestoration {

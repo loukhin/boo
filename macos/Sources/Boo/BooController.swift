@@ -396,6 +396,9 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         state.syncWindowChromeToWindow()
 
         BooController.all.append(self)
+        if state.bellTabCount > 0 {
+            state.notifyBellTabCountForDockBadge()
+        }
 
         // Listen for config changes
         NotificationCenter.default.addObserver(
@@ -1195,6 +1198,7 @@ extension BooController: NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         BooController.all.removeAll { $0 === self }
+        state.clearBellTabCountForWindowClose()
 
         // Update cascade point like Ghostty does so the next window
         // cascades from the remaining key window.
