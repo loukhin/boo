@@ -1013,8 +1013,9 @@ private final class BooProxyTitleNSView: NSView, NSDraggingSource {
 
 extension BooController {
     @objc func newWindow(_ sender: Any?) {
-        state.newWorkspace(
-            baseConfig: state.inheritedConfigForFocusedSurface(
+        _ = BooController.newWindow(
+            ghostty,
+            withBaseConfig: state.inheritedConfigForFocusedSurface(
                 context: GHOSTTY_SURFACE_CONTEXT_WINDOW
             )
         )
