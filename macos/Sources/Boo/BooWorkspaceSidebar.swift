@@ -235,6 +235,9 @@ struct BooWorkspaceSidebar: View {
             in: RoundedRectangle(cornerRadius: 6)
         )
         .contentShape(Rectangle())
+        .overlay(BooWorkspaceMiddleClickCloseView {
+            state.closeWorkspace(workspace.id)
+        })
         .onTapGesture {
             state.switchToWorkspace(workspace.id)
         }
@@ -391,6 +394,47 @@ private func performBooSidebarWindowDragOrDoubleClick(window: NSWindow?, event: 
     window.performDrag(with: event)
     window.isMovable = wasMovable
     return true
+}
+
+private struct BooWorkspaceMiddleClickCloseView: NSViewRepresentable {
+    let onMiddleClick: () -> Void
+
+    func makeNSView(context: Context) -> MiddleClickNSView {
+        let view = MiddleClickNSView()
+        view.onMiddleClick = onMiddleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: MiddleClickNSView, context: Context) {
+        nsView.onMiddleClick = onMiddleClick
+    }
+
+    final class MiddleClickNSView: NSView {
+        var onMiddleClick: (() -> Void)?
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let middlePressed = (NSEvent.pressedMouseButtons & (1 << 2)) != 0
+            guard middlePressed, bounds.contains(point) else { return nil }
+            return self
+        }
+
+        override func otherMouseDown(with event: NSEvent) {
+            // Swallow so the event doesn't bubble; we'll act on mouseUp.
+        }
+
+        override func otherMouseUp(with event: NSEvent) {
+            guard event.buttonNumber == 2 else {
+                super.otherMouseUp(with: event)
+                return
+            }
+            let location = convert(event.locationInWindow, from: nil)
+            if bounds.contains(location) {
+                onMiddleClick?()
+            }
+        }
+    }
 }
 
 private struct BooSidebarWindowDragZoneView: NSViewRepresentable {
