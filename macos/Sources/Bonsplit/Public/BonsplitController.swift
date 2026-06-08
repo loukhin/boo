@@ -32,6 +32,9 @@ public final class BonsplitController {
         }
     }
 
+    /// Called when the user asks to rename a tab from Bonsplit chrome.
+    public var onTabRenameRequested: ((Tab, PaneID) -> Void)?
+
     // MARK: - Initialization
 
     /// Create a new controller with the specified configuration

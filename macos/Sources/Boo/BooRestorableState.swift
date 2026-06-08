@@ -81,7 +81,11 @@ struct BooWorkspaceRestorableState: Codable {
         self.bonsplit = workspace.controller.restorableState().clearingTransientBooBellIndicators()
         self.surfaces = workspace.controller.allTabIds.compactMap { tabId in
             guard let surface = state.surfaces[tabId] else { return nil }
-            return BooSurfaceRestorableState(tabId: tabId, surface: surface)
+            return BooSurfaceRestorableState(
+                tabId: tabId,
+                surface: surface,
+                titleOverride: state.tabTitleOverrides[tabId]
+            )
         }
     }
 
@@ -118,6 +122,38 @@ struct BooWorkspaceRestorableState: Codable {
 struct BooSurfaceRestorableState: Codable {
     let tabId: TabID
     let surface: Ghostty.SurfaceView
+    let titleOverride: String?
+
+    init(
+        tabId: TabID,
+        surface: Ghostty.SurfaceView,
+        titleOverride: String?
+    ) {
+        self.tabId = tabId
+        self.surface = surface
+        self.titleOverride = titleOverride?.isEmpty == true ? nil : titleOverride
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tabId
+        case surface
+        case titleOverride
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.tabId = try container.decode(TabID.self, forKey: .tabId)
+        self.surface = try container.decode(Ghostty.SurfaceView.self, forKey: .surface)
+        let decodedTitleOverride = try container.decodeIfPresent(String.self, forKey: .titleOverride)
+        self.titleOverride = decodedTitleOverride?.isEmpty == true ? nil : decodedTitleOverride
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(tabId, forKey: .tabId)
+        try container.encode(surface, forKey: .surface)
+        try container.encodeIfPresent(titleOverride, forKey: .titleOverride)
+    }
 }
 
 private let booTransientBellTabIcon = "bell.fill"

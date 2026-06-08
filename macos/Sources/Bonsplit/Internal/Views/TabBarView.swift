@@ -176,6 +176,9 @@ struct TabBarView: View {
                     _ = controller.closeTab(TabID(id: tab.id), inPane: pane.id)
                 }
             },
+            onRename: {
+                controller.onTabRenameRequested?(Tab(from: tab), pane.id)
+            },
             onToggleSplitZoom: {
                 guard controller.toggleZoomedPane(pane.id) else { return }
                 controller.focusPane(pane.id)

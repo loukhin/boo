@@ -74,6 +74,11 @@ final class BooState: ObservableObject {
     /// Keyed by tab id; cancelled when the tab closes.
     private var surfaceSubscriptions: [TabID: Set<AnyCancellable>] = [:]
 
+    /// User-specified tab titles, keyed by Bonsplit tab id. A missing entry
+    /// means the tab follows the live terminal title, matching Ghostty's
+    /// native `titleOverride == nil` behavior.
+    private(set) var tabTitleOverrides: [TabID: String] = [:]
+
     /// Tab currently mirrored into the window chrome (window title + proxy
     /// icon). Set by `updateWindowChromeTabId()` on focus/selection changes.
     private var windowChromeTabId: TabID?
@@ -184,7 +189,11 @@ final class BooState: ObservableObject {
     }
 
     /// Init with an existing surface (for drag-out-to-new-window).
-    init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
+    init(
+        ghostty: Ghostty.App,
+        existingSurface: Ghostty.SurfaceView,
+        titleOverride: String? = nil
+    ) {
         self.ghostty = ghostty
         self.terminalBackgroundColor = BooChromeColors.terminalBackgroundColor(for: ghostty.config)
         self.terminalChromeBackgroundColor = BooChromeColors.terminalChromeBackgroundColor(for: ghostty.config)
@@ -193,7 +202,10 @@ final class BooState: ObservableObject {
 
         // Adopt the existing surface into the initial workspace instead of
         // creating a new one.
-        let workspaceId = createWorkspace(existingSurface: existingSurface)
+        let workspaceId = createWorkspace(
+            existingSurface: existingSurface,
+            titleOverride: titleOverride
+        )
         activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
     }
 
@@ -219,14 +231,16 @@ final class BooState: ObservableObject {
             BonsplitController(configuration: config)
         }
         controller.delegate = self
-        setupTabDragOutCallback(for: controller)
+        setupTabCallbacks(for: controller)
         return controller
     }
 
-    /// Set up callback for when a tab is dragged outside all windows.
-    private func setupTabDragOutCallback(for controller: BonsplitController) {
+    private func setupTabCallbacks(for controller: BonsplitController) {
         controller.onTabDragEndedOutside = { [weak self] tab, _, screenPoint in
             self?.handleTabDraggedOutside(tab: tab, at: screenPoint)
+        }
+        controller.onTabRenameRequested = { [weak self] tab, _ in
+            self?.promptTabTitle(tab.id)
         }
     }
 
@@ -265,6 +279,7 @@ final class BooState: ObservableObject {
         clearCommandPaletteIfNeeded(removing: surface)
 
         // Remove from our tracking
+        let titleOverride = tabTitleOverrides.removeValue(forKey: tab.id)
         surfaces.removeValue(forKey: tab.id)
         surfaceSubscriptions.removeValue(forKey: tab.id)
         sourceController.closeTab(tab.id)
@@ -278,7 +293,12 @@ final class BooState: ObservableObject {
         unfocusAllSurfaces()
 
         // Create new window with the dragged surface
-        _ = BooController.newWindow(ghostty, withSurface: surface, position: screenPoint)
+        _ = BooController.newWindow(
+            ghostty,
+            withSurface: surface,
+            position: screenPoint,
+            titleOverride: titleOverride
+        )
     }
 
     deinit {
@@ -354,6 +374,7 @@ final class BooState: ObservableObject {
         activeWorkspaceId = nil
         surfaces.removeAll()
         surfaceSubscriptions.removeAll()
+        tabTitleOverrides.removeAll()
         windowChromeTabId = nil
         windowChromeTitle = "Boo"
         windowChromeURL = nil
@@ -391,6 +412,7 @@ final class BooState: ObservableObject {
             workspaces.removeAll()
             surfaces.removeAll()
             surfaceSubscriptions.removeAll()
+            tabTitleOverrides.removeAll()
             let workspaceId = createWorkspace()
             activateWorkspace(.init(id: workspaceId, reason: .initialWindow))
             return
@@ -423,6 +445,10 @@ final class BooState: ObservableObject {
 
         for surfaceState in state.surfaces where validTabIds.contains(surfaceState.tabId) {
             guard surfaces[surfaceState.tabId] == nil else { continue }
+            if let titleOverride = surfaceState.titleOverride,
+               !titleOverride.isEmpty {
+                tabTitleOverrides[surfaceState.tabId] = titleOverride
+            }
             registerSurface(surfaceState.surface, forTab: surfaceState.tabId)
         }
 
@@ -494,7 +520,8 @@ final class BooState: ObservableObject {
 
     private func createWorkspace(
         baseConfig: Ghostty.SurfaceConfiguration? = nil,
-        existingSurface: Ghostty.SurfaceView? = nil
+        existingSurface: Ghostty.SurfaceView? = nil,
+        titleOverride: String? = nil
     ) -> WorkspaceID {
         let workspace = BooWorkspace(
             controller: makeWorkspaceController(),
@@ -511,7 +538,12 @@ final class BooState: ObservableObject {
         }
 
         if let existingSurface {
-            adoptSurface(existingSurface, in: workspace.controller, focusAfterCreate: false)
+            adoptSurface(
+                existingSurface,
+                in: workspace.controller,
+                titleOverride: titleOverride,
+                focusAfterCreate: false
+            )
         } else {
             newTab(in: workspace.controller, baseConfig: baseConfig, focusAfterCreate: false)
         }
@@ -556,10 +588,15 @@ final class BooState: ObservableObject {
             return titleWithBellPrefix(customTitle, hasBell: tabHasBell(tabId))
         }
 
-        if let tabId = selectedTabId(in: workspace),
-           let title = workspace.controller.tab(tabId)?.title.trimmingCharacters(in: .whitespacesAndNewlines),
-           !title.isEmpty {
-            return title
+        if let tabId = selectedTabId(in: workspace) {
+            if let titleOverride = tabTitleOverrides[tabId] {
+                return titleWithBellPrefix(titleOverride, hasBell: tabHasBell(tabId))
+            }
+
+            if let title = workspace.controller.tab(tabId)?.title.trimmingCharacters(in: .whitespacesAndNewlines),
+               !title.isEmpty {
+                return title
+            }
         }
 
         return "Boo"
@@ -571,10 +608,15 @@ final class BooState: ObservableObject {
             return customTitle
         }
 
-        if let tabId = selectedTabId(in: workspace),
-           let title = surfaces[tabId]?.title.trimmingCharacters(in: .whitespacesAndNewlines),
-           !title.isEmpty {
-            return title
+        if let tabId = selectedTabId(in: workspace) {
+            if let titleOverride = tabTitleOverrides[tabId] {
+                return titleOverride
+            }
+
+            if let title = surfaces[tabId]?.title.trimmingCharacters(in: .whitespacesAndNewlines),
+               !title.isEmpty {
+                return title
+            }
         }
 
         return "Boo"
@@ -649,6 +691,108 @@ final class BooState: ObservableObject {
         guard let route = surfaceRoute(for: surface) else { return false }
         renameWorkspace(route.workspace.id)
         return true
+    }
+
+    @discardableResult
+    func setCurrentTabTitle(_ title: String?) -> Bool {
+        guard let tabId = currentTabId() else { return false }
+        return setTabTitle(tabId, title: title)
+    }
+
+    @discardableResult
+    func setTabTitle(
+        containing surface: Ghostty.SurfaceView,
+        title: String?
+    ) -> Bool {
+        guard let route = surfaceRoute(for: surface) else { return false }
+        return setTabTitle(route.tabId, title: title)
+    }
+
+    func promptCurrentTabTitle() {
+        guard let tabId = currentTabId() else { return }
+        promptTabTitle(tabId)
+    }
+
+    @discardableResult
+    func promptTabTitle(containing surface: Ghostty.SurfaceView) -> Bool {
+        guard let route = surfaceRoute(for: surface) else { return false }
+        promptTabTitle(route.tabId)
+        return true
+    }
+
+    private func currentTabId() -> TabID? {
+        guard let workspace = activeWorkspace,
+              let pane = workspace.controller.focusedPaneId,
+              let tab = workspace.controller.selectedTab(inPane: pane) else { return nil }
+        return tab.id
+    }
+
+    @discardableResult
+    private func setTabTitle(_ tabId: TabID, title: String?) -> Bool {
+        guard let surface = surfaces[tabId] else { return false }
+        let newTitle = title?.isEmpty == true ? nil : title
+        guard tabTitleOverrides[tabId] != newTitle else { return true }
+
+        performUndoableStateChange("Rename Tab") {
+            objectWillChange.send()
+            if let newTitle {
+                tabTitleOverrides[tabId] = newTitle
+            } else {
+                tabTitleOverrides.removeValue(forKey: tabId)
+            }
+            let fallbackTitle = newTitle == nil
+                ? (surface.title.isEmpty ? "👻" : surface.title)
+                : nil
+            syncTabBellIndicator(tabId, surface: surface, fallbackTitle: fallbackTitle)
+            updateWindowChromeTabId()
+        }
+        return true
+    }
+
+    func promptTabTitle(_ tabId: TabID) {
+        guard surfaces[tabId] != nil else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Change Tab Title"
+        alert.informativeText = "Leave blank to restore the default."
+        alert.alertStyle = .informational
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 250, height: 24))
+        textField.stringValue = tabTitleOverrides[tabId] ?? tabTitleForPrompt(tabId)
+        alert.accessoryView = textField
+
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = textField
+
+        let applyRename = { [weak self, weak textField] in
+            guard let self, let textField else { return }
+            _ = self.setTabTitle(tabId, title: textField.stringValue)
+        }
+
+        if let window {
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn {
+                    applyRename()
+                }
+            }
+        } else if alert.runModal() == .alertFirstButtonReturn {
+            applyRename()
+        }
+    }
+
+    private func tabTitleForPrompt(_ tabId: TabID) -> String {
+        if let title = controllerContaining(tabId: tabId)?.tab(tabId)?.title,
+           !title.isEmpty {
+            return title
+        }
+
+        if let title = surfaces[tabId]?.title,
+           !title.isEmpty {
+            return title
+        }
+
+        return "Boo"
     }
 
     @discardableResult
@@ -805,6 +949,7 @@ final class BooState: ObservableObject {
             }
             surfaces.removeValue(forKey: tabId)
             surfaceSubscriptions.removeValue(forKey: tabId)
+            tabTitleOverrides.removeValue(forKey: tabId)
         }
 
         workspaces.remove(at: index)
@@ -822,15 +967,28 @@ final class BooState: ObservableObject {
 
     private enum SurfaceSource {
         case create(config: Ghostty.SurfaceConfiguration?)
-        case adopt(Ghostty.SurfaceView)
+        case adopt(Ghostty.SurfaceView, titleOverride: String?)
 
         @MainActor
         var initialTitle: String {
             switch self {
             case .create:
                 return "👻"
-            case .adopt(let surface):
+            case .adopt(let surface, let titleOverride):
+                if let titleOverride, !titleOverride.isEmpty {
+                    return titleOverride
+                }
                 return surface.title.isEmpty ? "👻" : surface.title
+            }
+        }
+
+        var titleOverride: String? {
+            switch self {
+            case .create:
+                return nil
+            case .adopt(_, let titleOverride):
+                guard let titleOverride, !titleOverride.isEmpty else { return nil }
+                return titleOverride
             }
         }
     }
@@ -887,12 +1045,14 @@ final class BooState: ObservableObject {
     func adoptSurface(
         _ surface: Ghostty.SurfaceView,
         inPane paneId: PaneID? = nil,
+        titleOverride: String? = nil,
         focusAfterCreate: Bool = true
     ) -> TabID? {
         adoptSurface(
             surface,
             in: controller,
             inPane: paneId,
+            titleOverride: titleOverride,
             focusAfterCreate: focusAfterCreate
         )
     }
@@ -902,12 +1062,13 @@ final class BooState: ObservableObject {
         _ surface: Ghostty.SurfaceView,
         in targetController: BonsplitController,
         inPane paneId: PaneID? = nil,
+        titleOverride: String? = nil,
         focusAfterCreate: Bool = true
     ) -> TabID? {
         guard let created = createSurfaceTab(
             in: targetController,
             paneId: paneId,
-            source: .adopt(surface)
+            source: .adopt(surface, titleOverride: titleOverride)
         ) else { return nil }
 
         if focusAfterCreate {
@@ -926,7 +1087,7 @@ final class BooState: ObservableObject {
         case .create(let config):
             guard let app = ghostty.app else { return nil }
             surface = Ghostty.SurfaceView(app, baseConfig: config)
-        case .adopt(let existingSurface):
+        case .adopt(let existingSurface, _):
             surface = existingSurface
         }
 
@@ -941,6 +1102,9 @@ final class BooState: ObservableObject {
 
         guard let tabId else { return nil }
 
+        if let titleOverride = source.titleOverride {
+            tabTitleOverrides[tabId] = titleOverride
+        }
         registerSurface(surface, forTab: tabId)
         updateWindowChromeTabId()
         return CreatedSurfaceTab(
@@ -1018,13 +1182,15 @@ final class BooState: ObservableObject {
         _ tabId: TabID,
         surface: Ghostty.SurfaceView,
         title titleOverride: String? = nil,
-        hasBell bellOverride: Bool? = nil
+        hasBell bellOverride: Bool? = nil,
+        fallbackTitle fallbackOverride: String? = nil
     ) {
         guard let controller = controllerContaining(tabId: tabId) else { return }
         let tab = controller.tab(tabId)
         let title = tabTitle(
             for: surface,
-            fallbackTitle: tab?.title,
+            tabId: tabId,
+            fallbackTitle: fallbackOverride ?? tab?.title,
             title: titleOverride,
             hasBell: bellOverride
         )
@@ -1034,16 +1200,21 @@ final class BooState: ObservableObject {
 
     private func tabTitle(
         for surface: Ghostty.SurfaceView,
+        tabId: TabID,
         fallbackTitle: String?,
         title titleOverride: String? = nil,
         hasBell bellOverride: Bool? = nil
     ) -> String {
-        let surfaceTitle = titleOverride ?? surface.title
         let title: String
-        if surfaceTitle.isEmpty {
-            title = Self.clearingBellTitlePrefix(from: fallbackTitle ?? "👻")
+        if let customTitle = tabTitleOverrides[tabId] {
+            title = customTitle
         } else {
-            title = surfaceTitle
+            let surfaceTitle = titleOverride ?? surface.title
+            if surfaceTitle.isEmpty {
+                title = Self.clearingBellTitlePrefix(from: fallbackTitle ?? "👻")
+            } else {
+                title = surfaceTitle
+            }
         }
         return titleWithBellPrefix(title, hasBell: bellOverride ?? surface.bell)
     }
@@ -1161,8 +1332,14 @@ final class BooState: ObservableObject {
         bellOverrideTabId: TabID? = nil,
         hasBell bellOverride: Bool? = nil
     ) {
-        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let baseTitle = trimmed.isEmpty ? "Boo" : trimmed
+        let baseTitle: String
+        if let tabId = windowChromeTabId,
+           let titleOverride = tabTitleOverrides[tabId] {
+            baseTitle = titleOverride
+        } else {
+            let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            baseTitle = trimmed.isEmpty ? "Boo" : trimmed
+        }
         let displayTitle = titleWithBellPrefix(
             baseTitle,
             hasBell: windowChromeTabHasBell(
@@ -1781,6 +1958,7 @@ extension BooState: BonsplitDelegate {
         clearCommandPaletteIfNeeded(removing: surface)
         surfaces.removeValue(forKey: tabId)
         surfaceSubscriptions.removeValue(forKey: tabId)
+        tabTitleOverrides.removeValue(forKey: tabId)
         return wasFocused
     }
 
@@ -2297,9 +2475,12 @@ extension BooState: BonsplitDelegate {
                 workspace.controller.tabs(inPane: paneId).compactMap { tab in
                     guard let surface = surfaces[tab.id] else { return nil }
 
+                    let titleOverride = tabTitleOverrides[tab.id]
                     let terminalTitle = surface.title.trimmingCharacters(in: .whitespacesAndNewlines)
                     let tabTitle = tab.title.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let title = if !terminalTitle.isEmpty {
+                    let title = if let titleOverride {
+                        titleOverride
+                    } else if !terminalTitle.isEmpty {
                         terminalTitle
                     } else if !tabTitle.isEmpty {
                         tabTitle

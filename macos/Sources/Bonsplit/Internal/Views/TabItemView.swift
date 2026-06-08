@@ -12,6 +12,7 @@ struct TabItemView: View {
     var isSplitZoomed: Bool = false
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onRename: () -> Void
     let onToggleSplitZoom: () -> Void
 
     @Environment(\.terminalBackgroundColor) private var backgroundColor
@@ -69,6 +70,11 @@ struct TabItemView: View {
         .onHover { hovering in
             withAnimation(.easeInOut(duration: TabBarMetrics.hoverDuration)) {
                 isHovered = hovering
+            }
+        }
+        .contextMenu {
+            Button("Rename Tab...") {
+                onRename()
             }
         }
         .accessibilityElement(children: .combine)

@@ -1678,7 +1678,7 @@ extension Ghostty {
                     return true
                 } else if let controller = window.windowController as? BooController {
                     Task { @MainActor in
-                        controller.state.setWorkspaceTitle(
+                        controller.state.setTabTitle(
                             containing: surfaceView,
                             title: titleOverride
                         )
@@ -1764,7 +1764,7 @@ extension Ghostty {
                         return true
                     } else if let controller = window.windowController as? BooController {
                         Task { @MainActor in
-                            controller.state.promptCurrentWorkspaceTitle()
+                            controller.state.promptCurrentTabTitle()
                         }
                         return true
                     }
@@ -1779,7 +1779,7 @@ extension Ghostty {
                         return true
                     } else if let controller = window.windowController as? BooController {
                         Task { @MainActor in
-                            controller.state.promptWorkspaceTitle(containing: surfaceView)
+                            controller.state.promptTabTitle(containing: surfaceView)
                         }
                         return true
                     }

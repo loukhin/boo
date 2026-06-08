@@ -84,9 +84,14 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     static func newWindow(
         _ ghostty: Ghostty.App,
         withSurface surface: Ghostty.SurfaceView,
-        position: NSPoint? = nil
+        position: NSPoint? = nil,
+        titleOverride: String? = nil
     ) -> BooController {
-        let c = BooController(ghostty: ghostty, existingSurface: surface)
+        let c = BooController(
+            ghostty: ghostty,
+            existingSurface: surface,
+            titleOverride: titleOverride
+        )
         c.showWindow(nil)
         if let window = c.window, !window.styleMask.contains(.fullScreen),
            let initialContentSize = BooWindowSizing.initialContentSize(
@@ -102,7 +107,11 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             // Make the new window key so the old window properly resigns
             window.makeKeyAndOrderFront(nil)
         }
-        c.registerNewWindowUndo(adopting: surface, position: position)
+        c.registerNewWindowUndo(
+            adopting: surface,
+            position: position,
+            titleOverride: titleOverride
+        )
         return c
     }
 
@@ -198,10 +207,16 @@ final class BooController: NSWindowController, NSMenuItemValidation {
 
     private func registerNewWindowUndo(
         adopting surface: Ghostty.SurfaceView,
-        position: NSPoint?
+        position: NSPoint?,
+        titleOverride: String?
     ) {
         registerNewWindowUndo {
-            _ = BooController.newWindow($0, withSurface: surface, position: position)
+            _ = BooController.newWindow(
+                $0,
+                withSurface: surface,
+                position: position,
+                titleOverride: titleOverride
+            )
         }
     }
 
@@ -269,10 +284,18 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     }
 
     /// Init with an existing surface (for drag-out-to-new-window).
-    init(ghostty: Ghostty.App, existingSurface: Ghostty.SurfaceView) {
+    init(
+        ghostty: Ghostty.App,
+        existingSurface: Ghostty.SurfaceView,
+        titleOverride: String? = nil
+    ) {
         self.ghostty = ghostty
         self.restorable = true
-        self.state = BooState(ghostty: ghostty, existingSurface: existingSurface)
+        self.state = BooState(
+            ghostty: ghostty,
+            existingSurface: existingSurface,
+            titleOverride: titleOverride
+        )
 
         let window = Self.makeWindow()
         super.init(window: window)
@@ -1043,7 +1066,7 @@ extension BooController {
     }
 
     @objc func changeTabTitle(_ sender: Any?) {
-        state.promptCurrentWorkspaceTitle()
+        state.promptCurrentTabTitle()
     }
 
     @objc func splitRight(_ sender: Any?) {
