@@ -14,6 +14,9 @@
 # Optional:
 #   BOO_SPARKLE_KEY             Path to Sparkle private ed25519 key (for sign_update)
 #   BOO_MAKE_DMG=1              Produce a signed .dmg (requires `create-dmg` via npm)
+#   BOO_UPLOAD_S3=1             Upload zip/dSYM/dmg/appcast to S3-compatible storage (default 1)
+#   BOO_S3_BUCKET=boo-tip       S3 bucket for tip release artifacts
+#   SIGN_UPDATE_BIN=sign_update Path to Sparkle sign_update binary
 #   SKIP_NOTARIZE=1             Skip notarization + stapling (for faster local smoke tests)
 #   SKIP_LIBGHOSTTY=1           Reuse existing GhosttyKit.xcframework, skip zig build
 #   CONFIGURATION=Release       Xcode configuration (default Release)
@@ -40,6 +43,7 @@ DIST_DIR="${REPO_ROOT}/dist/out"
 mkdir -p "${DIST_DIR}"
 
 BUILD_COMMIT="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
+BUILD_COMMIT_LONG="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 BUILD_NUMBER="$(git -C "${REPO_ROOT}" rev-list --count HEAD)"
 
 echo ">> Boo local release"
@@ -73,6 +77,10 @@ PLIST="${APP_PATH}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${PLIST}" || true
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${BUILD_COMMIT}" "${PLIST}" || true
 /usr/libexec/PlistBuddy -c "Set :BooCommit ${BUILD_COMMIT}" "${PLIST}" || true
+# Enable Sparkle auto-update checks for release builds (the plist defaults to
+# false so dev builds never auto-check). Actual behavior still follows the
+# user's `auto-update` config.
+/usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks true" "${PLIST}"
 
 # --- 4. codesign ----------------------------------------------------------
 
@@ -137,15 +145,95 @@ fi
 echo "   -> ${ZIP_OUT}"
 [[ -f "${DSYM_ZIP}" ]] && echo "   -> ${DSYM_ZIP}"
 
+DMG=""
+APPCAST_OUT=""
 if [[ "${BOO_MAKE_DMG:-0}" == "1" ]]; then
   echo ">> make dmg"
   command -v create-dmg >/dev/null || { echo "create-dmg not found: npm i -g create-dmg"; exit 1; }
   (cd "${DIST_DIR}" && create-dmg --identity="${MACOS_CERTIFICATE_NAME}" "${APP_PATH}")
-  # Sparkle signature for appcast
+
+  shopt -s nullglob
+  dmg_files=("${DIST_DIR}"/*.dmg)
+  shopt -u nullglob
+  if (( ${#dmg_files[@]} == 0 )); then
+    echo "error: create-dmg did not produce a dmg in ${DIST_DIR}" >&2
+    exit 1
+  fi
+  DMG="${dmg_files[0]}"
+  for candidate in "${dmg_files[@]}"; do
+    if [[ "${candidate}" -nt "${DMG}" ]]; then
+      DMG="${candidate}"
+    fi
+  done
+
+  # Sparkle signature + appcast
   if [[ -n "${BOO_SPARKLE_KEY:-}" ]]; then
-    command -v sign_update >/dev/null || { echo "sign_update (Sparkle) not in PATH"; exit 1; }
-    DMG="$(ls -1t "${DIST_DIR}"/*.dmg | head -n1)"
-    sign_update -f "${BOO_SPARKLE_KEY}" "${DMG}" | tee "${DMG}.sparkle.txt"
+    SIGN_UPDATE_BIN="${SIGN_UPDATE_BIN:-sign_update}"
+    if ! command -v "${SIGN_UPDATE_BIN}" >/dev/null; then
+      DERIVED_SIGN_UPDATE="${HOME}/Library/Developer/Xcode/DerivedData/Ghostty-aqqrqduyurnopxcircsilocwqhtr/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update"
+      if [[ -x "${DERIVED_SIGN_UPDATE}" ]]; then
+        SIGN_UPDATE_BIN="${DERIVED_SIGN_UPDATE}"
+      else
+        echo "sign_update (Sparkle) not found; set SIGN_UPDATE_BIN or put sign_update in PATH" >&2
+        exit 1
+      fi
+    fi
+
+    SIGN_UPDATE_OUT="${DIST_DIR}/sign_update.txt"
+    "${SIGN_UPDATE_BIN}" -f "${BOO_SPARKLE_KEY}" "${DMG}" | tee "${SIGN_UPDATE_OUT}"
+
+    echo ">> generate appcast"
+    APPCAST_WORK_DIR="${DIST_DIR}/appcast-work"
+    mkdir -p "${APPCAST_WORK_DIR}"
+    cp "${SIGN_UPDATE_OUT}" "${APPCAST_WORK_DIR}/sign_update.txt"
+
+    if curl -fsSL "https://tip.files.boo.lop.town/appcast.xml" -o "${APPCAST_WORK_DIR}/appcast.xml"; then
+      echo "   fetched existing appcast"
+    else
+      echo "error: failed to fetch appcast" >&2
+      exit 1
+    fi
+
+    (
+      cd "${APPCAST_WORK_DIR}"
+      BOO_BUILD="${BUILD_NUMBER}" \
+        BOO_COMMIT="${BUILD_COMMIT}" \
+        BOO_COMMIT_LONG="${BUILD_COMMIT_LONG}" \
+        python3 "${REPO_ROOT}/dist/macos/update_appcast_tip.py"
+      test -f appcast_new.xml
+    )
+
+    APPCAST_OUT="${DIST_DIR}/appcast.xml"
+    cp "${APPCAST_WORK_DIR}/appcast_new.xml" "${APPCAST_OUT}"
+    echo "   -> ${APPCAST_OUT}"
+  fi
+fi
+
+if [[ "${BOO_UPLOAD_S3:-1}" == "1" ]]; then
+  echo ">> upload to S3"
+  : "${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID or BOO_UPLOAD_S3=0}"
+  : "${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY or BOO_UPLOAD_S3=0}"
+  : "${AWS_ENDPOINT_URL_S3:?set AWS_ENDPOINT_URL_S3 or BOO_UPLOAD_S3=0}"
+  : "${AWS_REGION:?set AWS_REGION or BOO_UPLOAD_S3=0}"
+  BOO_S3_BUCKET="${BOO_S3_BUCKET:-boo-tip}"
+  export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION}}"
+  command -v aws >/dev/null || { echo "aws CLI not found" >&2; exit 1; }
+
+  upload_s3() {
+    local source_path="$1"
+    local destination_path="$2"
+    echo "   ${source_path} -> s3://${BOO_S3_BUCKET}/${destination_path}"
+    aws --endpoint-url "${AWS_ENDPOINT_URL_S3}" \
+      s3 cp "${source_path}" "s3://${BOO_S3_BUCKET}/${destination_path}"
+  }
+
+  if [[ -n "${DMG}" ]]; then
+    upload_s3 "${DMG}" "${BUILD_COMMIT_LONG}/Boo.dmg"
+  fi
+
+  # Upload appcast last so clients never see an update before the DMG exists.
+  if [[ -n "${APPCAST_OUT}" ]]; then
+    upload_s3 "${APPCAST_OUT}" "appcast.xml"
   fi
 fi
 
