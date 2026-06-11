@@ -242,6 +242,15 @@ final class BooState: ObservableObject {
         controller.onTabRenameRequested = { [weak self] tab, _ in
             self?.promptTabTitle(tab.id)
         }
+        controller.onTabTransferRequested = { [weak self, weak controller] tab, sourceController, _, destination in
+            guard let self, let controller else { return false }
+            return self.handleTabTransferRequest(
+                tab: tab,
+                from: sourceController,
+                into: controller,
+                destination: destination
+            )
+        }
     }
 
     /// Handle a tab being dragged outside all windows - create a new window.
@@ -299,6 +308,239 @@ final class BooState: ObservableObject {
             position: screenPoint,
             titleOverride: titleOverride
         )
+    }
+
+    // MARK: - Cross-window tab transfer
+
+    /// The BooState that owns a given Bonsplit controller, across all windows.
+    private static func state(owning controller: BonsplitController) -> BooState? {
+        BooController.all.first { booController in
+            booController.state.workspace(containing: controller) != nil
+        }?.state
+    }
+
+    /// Handle a tab dropped onto this window's Bonsplit UI when the drag
+    /// originated in a different controller (i.e. another window). Moves the
+    /// live surface between the two BooStates and inserts the tab at the
+    /// drop destination.
+    private func handleTabTransferRequest(
+        tab: Tab,
+        from sourceController: BonsplitController,
+        into targetController: BonsplitController,
+        destination: TabTransferDestination
+    ) -> Bool {
+        guard let sourceState = Self.state(owning: sourceController) else { return false }
+
+        // The UI can't start a drag from a hidden workspace, so a same-window
+        // transfer always means same-controller — which Bonsplit moves
+        // internally without involving this hook. Reject anything else to
+        // keep the remove-then-adopt bookkeeping strictly two-party.
+        guard sourceState !== self else { return false }
+        guard sourceState.surfaces[tab.id] != nil else { return false }
+
+        // Validate the drop destination before detaching anything from the
+        // source window so a stale pane id can't strand a live surface.
+        guard targetController.allPaneIds.contains(destination.paneId) else { return false }
+
+        let performTransfer: () -> Bool = { [weak self] in
+            guard let self,
+                  let released = sourceState.releaseTabForTransfer(tab.id, from: sourceController) else {
+                return false
+            }
+            return self.adoptTransferredTab(
+                tab,
+                surface: released.surface,
+                titleOverride: released.titleOverride,
+                into: targetController,
+                destination: destination
+            )
+        }
+
+        // Moving the last surface out empties (and closes) the source window,
+        // so the source half of the undo must resurrect the window itself
+        // (the same pattern Close Window undo uses) instead of restoring
+        // state on the dead BooState in place.
+        let sourceWindowWillClose = sourceState.surfaces.count <= 1
+
+        guard let undoManager, undoManager.isUndoRegistrationEnabled else {
+            return performTransfer()
+        }
+
+        let sourceBefore = BooRestorableState(from: sourceState)
+        let targetBefore = BooRestorableState(from: self)
+        let sourceFrame = sourceState.window?.frame
+
+        // Nothing inside the transfer registers undos itself (the release
+        // path bypasses the undoable close helper and adoption fires no
+        // didCreateTab), so only the paired registrations need grouping —
+        // and only on success, to avoid pushing an empty "Move Tab to
+        // Window" group onto the undo stack.
+        guard performTransfer() else { return false }
+
+        undoManager.beginUndoGrouping()
+        if sourceWindowWillClose {
+            registerClosedSourceWindowRestoreUndo(
+                frame: sourceFrame,
+                snapshot: sourceBefore
+            )
+        } else {
+            sourceState.registerSnapshotUndo(
+                "Move Tab to Window",
+                undoState: sourceBefore,
+                redoState: BooRestorableState(from: sourceState)
+            )
+        }
+        registerSnapshotUndo(
+            "Move Tab to Window",
+            undoState: targetBefore,
+            redoState: BooRestorableState(from: self)
+        )
+        undoManager.endUndoGrouping()
+        return true
+    }
+
+    /// Source half of a cross-window move's undo for the case where the move
+    /// emptied (and therefore closed) the source window.
+    ///
+    /// Undo resurrects the window from its pre-move snapshot — the snapshot
+    /// holds the live `SurfaceView`, so the terminal survives the round trip.
+    /// Redo closes the resurrected window again (without registering its own
+    /// Close Window undo) and re-arms this restore, mirroring the
+    /// `BooController.closeWindowImmediately` ↔ `restoreWindow` undo chain.
+    private func registerClosedSourceWindowRestoreUndo(
+        frame: NSRect?,
+        snapshot: BooRestorableState
+    ) {
+        guard let undoManager, undoManager.isUndoRegistrationEnabled else { return }
+        undoManager.setActionName("Move Tab to Window")
+        undoManager.registerUndo(
+            withTarget: ghostty,
+            expiresAfter: undoExpiration
+        ) { [weak self] ghostty in
+            let restored = BooController(ghostty: ghostty, restorableState: snapshot)
+            restored.showWindow(nil)
+            if let window = restored.window {
+                if let frame {
+                    window.setFrame(frame, display: true)
+                }
+                window.makeKeyAndOrderFront(nil)
+            }
+            restored.state.restoreFocus(toSurfaceWithId: snapshot.focusedSurfaceId)
+
+            // Redo half: close the resurrected window again, suppressing its
+            // own Close Window undo, then re-arm this restore so the
+            // undo/redo chain keeps working.
+            guard let self, let undoManager = self.undoManager else { return }
+            undoManager.setActionName("Move Tab to Window")
+            undoManager.registerUndo(
+                withTarget: restored,
+                expiresAfter: self.undoExpiration
+            ) { controller in
+                undoManager.disableUndoRegistration {
+                    controller.closeWindowImmediately(registerUndo: false)
+                }
+                self.registerClosedSourceWindowRestoreUndo(
+                    frame: frame,
+                    snapshot: snapshot
+                )
+            }
+        }
+    }
+
+    /// Detach a live surface from this window so it can move to another Boo
+    /// window. Mirrors `handleTabDraggedOutside`'s bookkeeping but hands the
+    /// surface back to the caller instead of spawning a new window.
+    private func releaseTabForTransfer(
+        _ tabId: TabID,
+        from sourceController: BonsplitController
+    ) -> (surface: Ghostty.SurfaceView, titleOverride: String?)? {
+        guard let surface = surfaces[tabId] else { return nil }
+
+        // Skip auto-focus in didCloseTab/didSelectTab while the tab leaves.
+        isDraggingTabOut = true
+        defer { isDraggingTabOut = false }
+
+        if focusedOwnedSurface === surface {
+            focusedOwnedSurface = nil
+        }
+        clearCommandPaletteIfNeeded(removing: surface)
+
+        // Remove from our tracking before closing the Bonsplit tab so
+        // `shouldCloseTab` lets the close through without confirmation.
+        let titleOverride = tabTitleOverrides.removeValue(forKey: tabId)
+        surfaces.removeValue(forKey: tabId)
+        surfaceSubscriptions.removeValue(forKey: tabId)
+        sourceController.closeTab(tabId)
+
+        // The destination window becomes key after the drop; hollow the
+        // cursor immediately so the surface doesn't paint focused in its new
+        // window before AppKit focus actually arrives.
+        surface.focusDidChange(false)
+        return (surface, titleOverride)
+    }
+
+    /// Adopt a surface released from another window into this window's
+    /// Bonsplit tree at the drop destination.
+    private func adoptTransferredTab(
+        _ tab: Tab,
+        surface: Ghostty.SurfaceView,
+        titleOverride: String?,
+        into targetController: BonsplitController,
+        destination: TabTransferDestination
+    ) -> Bool {
+        if let titleOverride {
+            tabTitleOverrides[tab.id] = titleOverride
+        }
+        // Register the surface before mutating Bonsplit so `didSplitPane` /
+        // `didSelectTab` observe an existing surface and focus it instead of
+        // spawning a fresh terminal in the new pane.
+        registerSurface(surface, forTab: tab.id)
+
+        var insertedTabId: TabID?
+        switch destination {
+        case .insert(let paneId, let index):
+            if targetController.adoptTab(tab, inPane: paneId, atIndex: index) {
+                insertedTabId = tab.id
+            }
+        case .split(let paneId, let orientation, let insertFirst):
+            if targetController.splitPaneWithAdoptedTab(
+                tab,
+                targetPaneId: paneId,
+                orientation: orientation,
+                insertFirst: insertFirst
+            ) != nil {
+                insertedTabId = tab.id
+            }
+        }
+
+        if insertedTabId == nil {
+            // Destination pane vanished mid-drop. Re-home the surface into
+            // the target controller's focused pane rather than dropping a
+            // live terminal on the floor.
+            surfaces.removeValue(forKey: tab.id)
+            surfaceSubscriptions.removeValue(forKey: tab.id)
+            tabTitleOverrides.removeValue(forKey: tab.id)
+            insertedTabId = adoptSurface(
+                surface,
+                in: targetController,
+                titleOverride: titleOverride,
+                focusAfterCreate: false
+            )
+        }
+
+        guard let insertedTabId else { return false }
+
+        // Refresh tab chrome now that the tab is reachable in this controller
+        // (bell prefix, custom title, window title / proxy icon).
+        syncTabBellIndicator(insertedTabId, surface: surface)
+        updateWindowChromeTabId()
+
+        // The drop landed in this window: make it key and move first
+        // responder into the transferred surface. `Ghostty.moveFocus`
+        // retries until SwiftUI has hosted the reparented NSView here.
+        window?.makeKeyAndOrderFront(nil)
+        focusSurface(for: insertedTabId, reason: .explicit)
+        return true
     }
 
     deinit {
@@ -2338,18 +2580,26 @@ extension BooState: BonsplitDelegate {
                 self.activateWorkspace(.init(id: workspace.id, reason: .initialWindow))
             }
 
-            guard let viewWindow = target.window else {
+            guard let window = self.window else { return }
+
+            // The surface may not be hosted yet (AppKit restoration), or may
+            // still be parented in its previous window mid-reparent (undoing
+            // a cross-window tab move). Retry until SwiftUI hosts it here.
+            guard let viewWindow = target.window, viewWindow == window else {
                 self.restoreFocus(toSurfaceWithId: target.id, attempts: attempts + 1)
                 return
             }
 
-            guard let window = self.window, viewWindow == window else { return }
-
             self.focusedOwnedSurface = target
-            viewWindow.makeFirstResponder(target)
-            if viewWindow.isKeyWindow {
-                target.focusDidChange(true)
-            }
+            window.makeFirstResponder(target)
+            // makeFirstResponder marks the surface focused regardless of key
+            // state (becomeFirstResponder side effect). Sync the cursor
+            // visuals with reality: only the key window's surface should
+            // paint focused — e.g. undoing a cross-window merge keys the
+            // resurrected window while this one restores in the background.
+            // windowDidBecomeKey → refocusCurrentSurface restores the filled
+            // cursor when this window becomes key again.
+            target.focusDidChange(window.isKeyWindow)
         }
     }
 

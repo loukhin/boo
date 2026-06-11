@@ -48,7 +48,7 @@ struct TabBarView: View {
 
     /// Whether this tab bar should show full saturation (focused or drag source)
     private var shouldShowFullSaturation: Bool {
-        isFocused || splitViewController.dragSourcePaneId == pane.id
+        isFocused || TabDragSession.shared.isSource(pane: pane.id, in: splitViewController)
     }
 
     /// Width reserved for the trailing split-button lane.
@@ -111,7 +111,6 @@ struct TabBarView: View {
                                     targetIndex: pane.tabs.count,
                                     pane: pane,
                                     bonsplitController: controller,
-                                    controller: splitViewController,
                                     dropTargetIndex: $dropTargetIndex
                                 ))
                         }
@@ -203,7 +202,6 @@ struct TabBarView: View {
             targetIndex: index,
             pane: pane,
             bonsplitController: controller,
-            controller: splitViewController,
             dropTargetIndex: $dropTargetIndex
         ))
         .overlay(alignment: .leading) {
@@ -216,9 +214,9 @@ struct TabBarView: View {
     // MARK: - Item Provider for Drag
 
     private func createItemProvider(for tab: TabItem) -> NSItemProvider {
-        // Set drag source for visual feedback
-        splitViewController.draggingTab = tab
-        splitViewController.dragSourcePaneId = pane.id
+        // Begin the process-wide drag session. Drop targets in any window
+        // consult it for visual feedback and to perform the actual move.
+        TabDragSession.shared.begin(tab: tab, source: controller, pane: pane.id)
 
         // Start polling to detect drag end for "drag outside" feature
         startDragEndDetection(for: tab, from: pane.id)
@@ -251,23 +249,21 @@ struct TabBarView: View {
 
                 // Delay to let SwiftUI's drop handling complete first
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    guard let controller = splitViewController else { return }
+                    let session = TabDragSession.shared
 
-                    // If draggingTab is still set, no valid drop occurred
-                    if controller.draggingTab != nil {
-                        // Check if dropped outside all app windows
-                        let inWindow = NSApp.windows.contains { window in
-                            window.isVisible && window.frame.contains(screenPoint)
-                        }
+                    // If the session is still alive, no drop target (in any
+                    // window) consumed the drag.
+                    guard session.tab?.id == tab.id else { return }
+                    session.end()
 
-                        if !inWindow {
-                            // Trigger "dropped outside" callback
-                            controller.onTabDragEndedOutside?(tab, sourcePaneId, screenPoint)
-                        }
+                    // Check if dropped outside all app windows
+                    let inWindow = NSApp.windows.contains { window in
+                        window.isVisible && window.frame.contains(screenPoint)
+                    }
 
-                        // Clear drag state
-                        controller.draggingTab = nil
-                        controller.dragSourcePaneId = nil
+                    if !inWindow {
+                        // Trigger "dropped outside" callback
+                        splitViewController?.onTabDragEndedOutside?(tab, sourcePaneId, screenPoint)
                     }
                 }
             }
@@ -284,7 +280,6 @@ struct TabBarView: View {
                 targetIndex: pane.tabs.count,
                 pane: pane,
                 bonsplitController: controller,
-                controller: splitViewController,
                 dropTargetIndex: $dropTargetIndex
             ))
             .overlay(alignment: .leading) {
@@ -304,7 +299,6 @@ struct TabBarView: View {
                 targetIndex: pane.tabs.count,
                 pane: pane,
                 bonsplitController: controller,
-                controller: splitViewController,
                 dropTargetIndex: $dropTargetIndex
             ))
     }
@@ -323,7 +317,6 @@ struct TabBarView: View {
                 targetIndex: pane.tabs.count,
                 pane: pane,
                 bonsplitController: controller,
-                controller: splitViewController,
                 dropTargetIndex: $dropTargetIndex
             ))
     }
@@ -532,23 +525,31 @@ struct TabDropDelegate: DropDelegate {
     let targetIndex: Int
     let pane: PaneState
     let bonsplitController: BonsplitController
-    let controller: SplitViewController
     @Binding var dropTargetIndex: Int?
 
     func performDrop(info: DropInfo) -> Bool {
         dropTargetIndex = nil
 
-        // Use stored drag state directly (faster than async NSItemProvider)
-        guard let tab = controller.draggingTab,
-              let sourcePaneId = controller.dragSourcePaneId else {
+        // Use the shared drag session directly (faster than async
+        // NSItemProvider, and it works across windows).
+        let session = TabDragSession.shared
+        guard let draggedTab = session.tab,
+              let sourceId = session.sourcePaneId,
+              let sourceController = session.sourceController else {
             return false
         }
+        session.end()
 
-        // Clear drag state
-        let draggedTab = tab
-        let sourceId = sourcePaneId
-        controller.draggingTab = nil
-        controller.dragSourcePaneId = nil
+        // Tab came from a different controller (typically another window's
+        // Bonsplit). Content is host-owned, so hand the transfer to the host.
+        guard sourceController === bonsplitController else {
+            return bonsplitController.requestTabTransfer(
+                Tab(from: draggedTab),
+                from: sourceController,
+                sourcePane: sourceId,
+                to: .insert(pane: pane.id, index: targetIndex)
+            )
+        }
 
         // Same pane - reorder
         if sourceId == pane.id {

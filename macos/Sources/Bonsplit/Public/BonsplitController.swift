@@ -35,6 +35,36 @@ public final class BonsplitController {
     /// Called when the user asks to rename a tab from Bonsplit chrome.
     public var onTabRenameRequested: ((Tab, PaneID) -> Void)?
 
+    /// Called when a tab belonging to a *different* BonsplitController is
+    /// dropped onto this controller's UI (for example, dragged from another
+    /// window's tab bar or pane).
+    ///
+    /// Bonsplit cannot move tab content between controllers on its own —
+    /// content is host-owned. The host should release the content associated
+    /// with the tab from the source controller's owner, then call
+    /// `adoptTab(_:inPane:atIndex:)` or
+    /// `splitPaneWithAdoptedTab(_:targetPaneId:orientation:insertFirst:)` on
+    /// this controller to complete the move. Return `true` if the transfer
+    /// was performed; returning `false` (or leaving this unset) rejects the
+    /// drop.
+    public var onTabTransferRequested: ((
+        _ tab: Tab,
+        _ source: BonsplitController,
+        _ sourcePane: PaneID,
+        _ destination: TabTransferDestination
+    ) -> Bool)?
+
+    /// Invoked by drop delegates when a tab from another controller lands on
+    /// one of this controller's drop targets.
+    internal func requestTabTransfer(
+        _ tab: Tab,
+        from source: BonsplitController,
+        sourcePane: PaneID,
+        to destination: TabTransferDestination
+    ) -> Bool {
+        onTabTransferRequested?(tab, source, sourcePane, destination) ?? false
+    }
+
     // MARK: - Initialization
 
     /// Create a new controller with the specified configuration
@@ -452,6 +482,73 @@ public final class BonsplitController {
 
             return newPaneId
         }
+    }
+
+    /// Insert an existing tab (preserving its identity) into a pane of this
+    /// controller, selecting it and focusing the pane.
+    ///
+    /// Designed for host-driven cross-controller transfers: the tab's content
+    /// already exists, so this fires `didFocusPane`/`didSelectTab` but
+    /// intentionally not `didCreateTab`.
+    @discardableResult
+    public func adoptTab(_ tab: Tab, inPane paneId: PaneID, atIndex index: Int? = nil) -> Bool {
+        guard let pane = internalController.rootNode?.findPane(paneId) else { return false }
+
+        let tabItem = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        if let index {
+            pane.insertTab(tabItem, at: index)
+        } else {
+            pane.addTab(tabItem)
+        }
+
+        internalController.focusPane(paneId)
+        delegate?.splitTabBar(self, didFocusPane: paneId)
+        delegate?.splitTabBar(self, didSelectTab: tab, inPane: paneId)
+        return true
+    }
+
+    /// Split a pane and adopt an existing tab into the newly created pane.
+    ///
+    /// Like `splitPaneWithMovedTab`, but the tab comes from outside this
+    /// controller (cross-controller transfer), so there is no source pane to
+    /// clean up here — the host handles the source side.
+    ///
+    /// Fires: `didSplitPane`, `didFocusPane`, and `didSelectTab`.
+    @discardableResult
+    public func splitPaneWithAdoptedTab(
+        _ tab: Tab,
+        targetPaneId: PaneID,
+        orientation: SplitOrientation,
+        insertFirst: Bool
+    ) -> PaneID? {
+        guard configuration.allowSplits else { return nil }
+        guard internalController.rootNode?.findPane(targetPaneId) != nil else { return nil }
+
+        // Check with delegate
+        if delegate?.splitTabBar(self, shouldSplitPane: targetPaneId, orientation: orientation) == false {
+            return nil
+        }
+
+        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        internalController.splitPaneWithTab(
+            targetPaneId,
+            orientation: orientation,
+            tab: internalTab,
+            insertFirst: insertFirst
+        )
+
+        guard let newPaneId = focusedPaneId else { return nil }
+
+        delegate?.splitTabBar(self, didSplitPane: targetPaneId, newPane: newPaneId, orientation: orientation)
+        delegate?.splitTabBar(self, didFocusPane: newPaneId)
+        delegate?.splitTabBar(self, didSelectTab: tab, inPane: newPaneId)
+
+        // Notify geometry change after a brief delay to allow layout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.notifyGeometryChange()
+        }
+
+        return newPaneId
     }
 
     /// Close a specific pane

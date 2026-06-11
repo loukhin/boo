@@ -15,13 +15,10 @@ final class SplitViewController {
     /// Pane currently zoomed to occupy the full split area.
     var zoomedPaneId: PaneID?
 
-    /// Tab currently being dragged (for visual feedback)
-    var draggingTab: TabItem?
-
-    /// Source pane of the dragging tab
-    var dragSourcePaneId: PaneID?
-
     /// Callback when a tab drag ends outside any valid target
+    ///
+    /// NOTE: In-flight drag state itself lives in `TabDragSession.shared`
+    /// because drags can cross window (and therefore controller) boundaries.
     var onTabDragEndedOutside: ((TabItem, PaneID, NSPoint?) -> Void)?
 
     /// Current frame of the entire split view container

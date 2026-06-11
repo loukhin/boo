@@ -28,7 +28,6 @@ enum DropZone: Equatable {
 /// Container for a single pane with its tab bar and content area
 struct PaneContainerView<Content: View>: View {
     @Environment(BonsplitController.self) private var bonsplitController
-    @Environment(SplitViewController.self) private var controller
 
     @Bindable var pane: PaneState
     let contentBuilder: (TabItem, PaneID) -> Content
@@ -73,10 +72,10 @@ struct PaneContainerView<Content: View>: View {
             // Clear the placeholder whenever a drag session ends, even if
             // `dropExited` never fired on this pane (e.g. when the drop was
             // handled by a sibling tab bar, or when the overlay unmounted
-            // because `draggingTab` was cleared before AppKit delivered the
+            // because the drag session ended before AppKit delivered the
             // exit event). Without this, the blue zone overlay can get stuck
             // on screen after a tab drag.
-            .onChange(of: controller.draggingTab == nil) { _, noDrag in
+            .onChange(of: TabDragSession.shared.tab == nil) { _, noDrag in
                 if noDrag { activeDropZone = nil }
             }
         }
@@ -136,13 +135,16 @@ struct PaneContainerView<Content: View>: View {
         // `.bonsplitTab`) shadows the terminal surface's own drag destination
         // below it — breaking Finder file drops into the terminal. So we
         // conditionally render it: no overlay = no registration.
-        if controller.draggingTab != nil {
+        //
+        // The session is process-wide, so during a drag every window mounts
+        // its pane drop zones — that's what makes dropping a tab into
+        // another window's splits possible.
+        if TabDragSession.shared.tab != nil {
             Color.clear
                 .onDrop(of: [.bonsplitTab], delegate: UnifiedPaneDropDelegate(
                     size: size,
                     pane: pane,
                     bonsplitController: bonsplitController,
-                    controller: controller,
                     activeDropZone: $activeDropZone
                 ))
         }
@@ -192,7 +194,6 @@ struct UnifiedPaneDropDelegate: DropDelegate {
     let size: CGSize
     let pane: PaneState
     let bonsplitController: BonsplitController
-    let controller: SplitViewController
     @Binding var activeDropZone: DropZone?
 
     // Calculate zone based on position within the view
@@ -219,17 +220,36 @@ struct UnifiedPaneDropDelegate: DropDelegate {
         let zone = zoneForLocation(info.location)
         activeDropZone = nil
 
-        // Use stored drag state directly (faster than async NSItemProvider)
-        guard let tab = controller.draggingTab,
-              let sourcePaneId = controller.dragSourcePaneId else {
+        // Use the shared drag session directly (faster than async
+        // NSItemProvider, and it works across windows).
+        let session = TabDragSession.shared
+        guard let draggedTab = session.tab,
+              let sourceId = session.sourcePaneId,
+              let sourceController = session.sourceController else {
             return false
         }
-        
-        // Clear drag state
-        let draggedTab = tab
-        let sourceId = sourcePaneId
-        controller.draggingTab = nil
-        controller.dragSourcePaneId = nil
+        session.end()
+
+        // Tab came from a different controller (typically another window's
+        // Bonsplit). Content is host-owned, so hand the transfer to the host.
+        guard sourceController === bonsplitController else {
+            let destination: TabTransferDestination
+            if let orientation = zone.orientation {
+                destination = .split(
+                    pane: pane.id,
+                    orientation: orientation,
+                    insertFirst: zone.insertsFirst
+                )
+            } else {
+                destination = .insert(pane: pane.id, index: nil)
+            }
+            return bonsplitController.requestTabTransfer(
+                Tab(from: draggedTab),
+                from: sourceController,
+                sourcePane: sourceId,
+                to: destination
+            )
+        }
 
         if zone == .center {
             // Drop in center - move tab to this pane
@@ -270,9 +290,10 @@ struct UnifiedPaneDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         // Only update drop zone if there's an active drag. After performDrop
-        // clears draggingTab, we ignore further updates to prevent the overlay
-        // from appearing on newly created panes during view restructuring.
-        if controller.draggingTab != nil {
+        // ends the drag session, we ignore further updates to prevent the
+        // overlay from appearing on newly created panes during view
+        // restructuring.
+        if TabDragSession.shared.tab != nil {
             activeDropZone = zoneForLocation(info.location)
         }
         return DropProposal(operation: .move)
