@@ -105,6 +105,14 @@ class AppDelegate: NSObject,
     /// The current state of the quick terminal.
     private var quickTerminalControllerState: QuickTerminalState = .uninitialized
 
+    /// Whether the quick terminal has already been initialized.
+    var quickControllerInitialized: Bool {
+        if case .initialized = quickTerminalControllerState {
+            return true
+        }
+        return false
+    }
+
     /// Our quick terminal. This starts out uninitialized and only initializes if used.
     var quickController: QuickTerminalController {
         switch quickTerminalControllerState {
@@ -406,20 +414,7 @@ class AppDelegate: NSObject,
         // If our app says we don't need to confirm, we can exit now.
         if !ghostty.needsConfirmQuit { return .terminateNow }
 
-        // We have some visible window. Show an app-wide modal to confirm quitting.
-        let alert = NSAlert()
-        alert.messageText = "Quit Boo?"
-        alert.informativeText = "All terminal sessions will be terminated."
-        alert.addButton(withTitle: "Quit Boo")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            return .terminateNow
-
-        default:
-            return .terminateCancel
-        }
+        return terminate()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -440,7 +435,7 @@ class AppDelegate: NSObject,
         // This is possible with flag set to false if there a race where the
         // window is still initializing and is not visible but the user clicked
         // the dock icon.
-        guard TerminalController.all.isEmpty else { return true }
+        guard TerminalController.all.isEmpty && BooController.all.isEmpty else { return true }
 
         // If the application isn't active yet then we don't want to process
         // this because we're not ready. This happens sometimes in Xcode runs
@@ -622,7 +617,7 @@ class AppDelegate: NSObject,
         // Build our event input and call ghostty
         if ghostty_app_key(ghostty, event.ghosttyKeyEvent(GHOSTTY_ACTION_PRESS)) {
             // The key was used so we want to stop it from going to our Mac app
-            Ghostty.logger.debug("local key event handled event=\(event)")
+            Ghostty.logger.debug("local key event handled event=\(event, privacy: .public)")
             return nil
         }
 
@@ -684,7 +679,7 @@ class AppDelegate: NSObject,
     private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
         center.requestAuthorization(options: [.badge]) { granted, error in
             if let error = error {
-                Self.logger.warning("Error requesting badge authorization: \(error)")
+                Self.logger.warning("Error requesting badge authorization: \(error, privacy: .public)")
                 return
             }
 
@@ -1380,6 +1375,92 @@ extension AppDelegate: NSMenuItemValidation {
 
         default:
             return true
+        }
+    }
+}
+
+// MARK: - Termination Flow
+
+private protocol TerminalTerminationController: AnyObject {
+    var window: NSWindow? { get }
+
+    func windowCanBeClosedWithoutConfirmation() -> Bool
+    func confirmCloseAsync(
+        messageText: String,
+        informativeText: String,
+        confirmButtonTitle: String
+    ) async -> NSApplication.ModalResponse?
+}
+
+extension BaseTerminalController: TerminalTerminationController {}
+extension BooController: TerminalTerminationController {}
+
+extension AppDelegate {
+    func terminate() -> NSApplication.TerminateReply {
+        let controllersNeedConfirmation = NSApplication.shared.windows
+            .compactMap { $0.windowController as? any TerminalTerminationController }
+            .filter { !$0.windowCanBeClosedWithoutConfirmation() }
+
+        guard !controllersNeedConfirmation.isEmpty else {
+            return .terminateNow
+        }
+
+        if controllersNeedConfirmation.count == 1 {
+            Task {
+                let response = await controllersNeedConfirmation[0].confirmCloseAsync(
+                    messageText: "Quit Boo?",
+                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
+                    confirmButtonTitle: "Terminate",
+                )
+
+                if [.OK, .alertFirstButtonReturn].contains(response) {
+                    await NSApp.reply(toApplicationShouldTerminate: true)
+                } else {
+                    await NSApp.reply(toApplicationShouldTerminate: false)
+                }
+            }
+
+            return .terminateLater
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "You have \(controllersNeedConfirmation.count) windows with running processes. Do you want to review these windows before quitting?"
+            alert.informativeText = "If you don't review your windows, any running processes will be terminated"
+            alert.addButton(withTitle: "Review Windows...")
+            alert.addButton(withTitle: "Terminate Processes")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .warning
+
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                reviewWindows(controllersNeedConfirmation)
+                return .terminateLater
+            case .alertSecondButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
+        }
+    }
+
+    private func reviewWindows(_ controllers: [any TerminalTerminationController]) {
+        Task {
+            for controller in controllers {
+                let response = await controller.confirmCloseAsync(
+                    messageText: "Quit Boo?",
+                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
+                    confirmButtonTitle: "Terminate",
+                )
+
+                if [.OK, .alertFirstButtonReturn].contains(response) {
+                    // Close this window and continue until the next review is cancelled.
+                    await controller.window?.close()
+                    continue
+                } else {
+                    await NSApp.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+            }
+            await NSApp.reply(toApplicationShouldTerminate: true)
         }
     }
 }

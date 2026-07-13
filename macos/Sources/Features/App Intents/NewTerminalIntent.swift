@@ -94,10 +94,12 @@ struct NewTerminalIntent: AppIntent {
             }
 
             parent = view
+        } else if let activeBoo = (NSApp.keyWindow ?? NSApp.mainWindow)?.windowController as? BooController {
+            parent = activeBoo.state.focusedSurface
         } else if let preferred = TerminalController.preferredParent {
             parent = preferred.focusedSurface ?? preferred.surfaceTree.root?.leftmostLeaf()
         } else {
-            parent = nil
+            parent = BooController.preferredParent?.state.focusedSurface
         }
 
         defer {
@@ -109,9 +111,10 @@ struct NewTerminalIntent: AppIntent {
         case .window:
             let newController = BooController.newWindow(
                 ghostty,
-                withBaseConfig: config)
+                withBaseConfig: config,
+                withParent: parent?.window)
             if let view = newController.state.focusedSurface {
-                return .result(value: TerminalEntity(view))
+                return .result(value: await TerminalEntity(view: view))
             }
 
         case .tab:
@@ -120,7 +123,7 @@ struct NewTerminalIntent: AppIntent {
                 from: parent?.window,
                 withBaseConfig: config)
             if let view = newController?.state.focusedSurface {
-                return .result(value: TerminalEntity(view))
+                return .result(value: await TerminalEntity(view: view))
             }
 
         case .splitLeft, .splitRight, .splitUp, .splitDown:
@@ -128,29 +131,28 @@ struct NewTerminalIntent: AppIntent {
                 throw GhosttyIntentError.surfaceNotFound
             }
 
-            // Try BooController first
             if let booController = parent.window?.windowController as? BooController {
-                let direction: SplitDirection = {
-                    switch location {
-                    case .splitLeft: return .left
-                    case .splitRight: return .right
-                    case .splitUp: return .up
-                    case .splitDown: return .down
-                    default: return .right
-                    }
-                }()
-                booController.state.splitCurrentPane(direction: direction)
-                if let view = booController.state.focusedSurface {
-                    return .result(value: TerminalEntity(view))
+                let direction: SplitDirection = switch location {
+                case .splitLeft: .left
+                case .splitRight: .right
+                case .splitUp: .up
+                case .splitDown: .down
+                default: fatalError("unreachable terminal split location")
+                }
+                if let view = booController.state.splitSurface(
+                    parent,
+                    direction: direction,
+                    baseConfig: config
+                ) {
+                    return .result(value: await TerminalEntity(view: view))
                 }
             } else if let controller = parent.window?.windowController as? BaseTerminalController {
-                // Fall back to legacy TerminalController
                 if let view = controller.newSplit(
                     at: parent,
                     direction: location.splitDirection!,
                     baseConfig: config
                 ) {
-                    return .result(value: TerminalEntity(view))
+                    return .result(value: await TerminalEntity(view: view))
                 }
             } else {
                 throw GhosttyIntentError.surfaceNotFound

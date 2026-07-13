@@ -45,7 +45,6 @@ struct AboutView: View {
 
     private var copyright: String? { Bundle.main.infoDictionary?["NSHumanReadableCopyright"] as? String }
 
-
     var body: some View {
         VStack(alignment: .center) {
             CyclingIconView()

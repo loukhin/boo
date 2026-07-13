@@ -2116,11 +2116,29 @@ extension BooState: BonsplitDelegate {
         }
     }
 
+    @discardableResult
+    func closeSurface(
+        _ surface: Ghostty.SurfaceView,
+        withConfirmation: Bool
+    ) -> Bool {
+        guard let route = surfaceRoute(for: surface, requirePane: true),
+              let pane = route.paneId else { return false }
+
+        closeTabUndoably(
+            route.tabId,
+            inPane: pane,
+            controller: route.controller,
+            withConfirmation: withConfirmation
+        )
+        return true
+    }
+
     private func closeTabUndoably(
         _ tabId: TabID,
         inPane pane: PaneID,
         controller: BonsplitController,
-        actionName: String = "Close Tab"
+        actionName: String = "Close Tab",
+        withConfirmation: Bool = true
     ) {
         guard let surface = surfaces[tabId] else { return }
 
@@ -2139,7 +2157,7 @@ extension BooState: BonsplitDelegate {
             }
         }
 
-        guard surface.needsConfirmQuit else {
+        guard withConfirmation && surface.needsConfirmQuit else {
             close()
             return
         }
@@ -2773,6 +2791,22 @@ extension BooState: BonsplitDelegate {
         // queue turn, so mirror BaseTerminalController and re-assert the target
         // shortly afterward.
         Ghostty.moveFocus(to: surface, delay: 0.1)
+    }
+
+    /// Split the pane containing a specific surface and return the new surface.
+    @discardableResult
+    func splitSurface(
+        _ surface: Ghostty.SurfaceView,
+        direction: SplitDirection,
+        baseConfig: Ghostty.SurfaceConfiguration?
+    ) -> Ghostty.SurfaceView? {
+        let existingTabIds = Set(surfaces.keys)
+        splitPane(
+            from: surface,
+            direction: ghosttyDirection(for: direction),
+            baseConfig: baseConfig
+        )
+        return surfaces.first(where: { !existingTabIds.contains($0.key) })?.value
     }
 
     /// Split the current pane in the given direction.

@@ -18,6 +18,13 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     /// same way it does for `TerminalController.all`.
     static private(set) var all: [BooController] = []
 
+    /// The Boo controller that should receive app-scoped actions.
+    static var preferredParent: BooController? {
+        all.first(where: { $0.window?.isKeyWindow == true })
+            ?? all.first(where: { $0.window?.isMainWindow == true })
+            ?? all.last
+    }
+
     let state: BooState
     private let ghostty: Ghostty.App
     private let restorable: Bool
@@ -57,9 +64,11 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     @discardableResult
     static func newWindow(
         _ ghostty: Ghostty.App,
-        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil
+        withBaseConfig baseConfig: Ghostty.SurfaceConfiguration? = nil,
+        withParent parent: NSWindow? = nil
     ) -> BooController {
         let c = BooController(ghostty: ghostty, baseConfig: baseConfig)
+        c.isBackgroundOpaque = inheritedBackgroundOpacity(from: parent)
         c.showWindow(nil)
         if let window = c.window, !window.styleMask.contains(.fullScreen) {
             let initialContentSize = BooWindowSizing.initialContentSize(
@@ -85,13 +94,16 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         _ ghostty: Ghostty.App,
         withSurface surface: Ghostty.SurfaceView,
         position: NSPoint? = nil,
-        titleOverride: String? = nil
+        titleOverride: String? = nil,
+        inheritBackgroundOpacity: Bool? = nil
     ) -> BooController {
         let c = BooController(
             ghostty: ghostty,
             existingSurface: surface,
             titleOverride: titleOverride
         )
+        c.isBackgroundOpaque = inheritBackgroundOpacity
+            ?? inheritedBackgroundOpacity(from: surface.window)
         c.showWindow(nil)
         if let window = c.window, !window.styleMask.contains(.fullScreen),
            let initialContentSize = BooWindowSizing.initialContentSize(
@@ -110,9 +122,27 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         c.registerNewWindowUndo(
             adopting: surface,
             position: position,
-            titleOverride: titleOverride
+            titleOverride: titleOverride,
+            inheritBackgroundOpacity: c.isBackgroundOpaque
         )
         return c
+    }
+
+    /// Carry Ghostty's process-wide opacity toggle into newly-created Boo windows.
+    private static func inheritedBackgroundOpacity(from parent: NSWindow?) -> Bool {
+        if let controller = parent?.windowController as? BooController {
+            return controller.isBackgroundOpaque
+        }
+        if let controller = parent?.windowController as? BaseTerminalController {
+            return controller.isBackgroundOpaque
+        }
+        if let controller = preferredParent {
+            return controller.isBackgroundOpaque
+        }
+        return NSApp.windows
+            .compactMap { $0.windowController as? BaseTerminalController }
+            .first?
+            .isBackgroundOpaque ?? false
     }
 
     /// Create a new tab in an existing Boo window, or a new window if none exists.
@@ -142,6 +172,33 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         } else {
             // No existing window, create a new one
             return newWindow(ghostty, withBaseConfig: baseConfig)
+        }
+    }
+
+    func windowCanBeClosedWithoutConfirmation() -> Bool {
+        state.surfaces.isEmpty || !state.surfaces.values.contains { $0.needsConfirmQuit }
+    }
+
+    func confirmCloseAsync(
+        messageText: String,
+        informativeText: String,
+        confirmButtonTitle: String = "Close"
+    ) async -> NSApplication.ModalResponse? {
+        guard let window else { return .OK }
+        guard window.attachedSheet == nil else { return nil }
+
+        let alert = NSAlert()
+        alert.messageText = messageText
+        alert.informativeText = informativeText
+        alert.addButton(withTitle: confirmButtonTitle)
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+
+        return await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { response in
+                alert.window.orderOut(nil)
+                continuation.resume(returning: response)
+            }
         }
     }
 
@@ -208,14 +265,16 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     private func registerNewWindowUndo(
         adopting surface: Ghostty.SurfaceView,
         position: NSPoint?,
-        titleOverride: String?
+        titleOverride: String?,
+        inheritBackgroundOpacity: Bool
     ) {
         registerNewWindowUndo {
             _ = BooController.newWindow(
                 $0,
                 withSurface: surface,
                 position: position,
-                titleOverride: titleOverride
+                titleOverride: titleOverride,
+                inheritBackgroundOpacity: inheritBackgroundOpacity
             )
         }
     }
@@ -551,12 +610,24 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         return nil
     }
 
+    static func syncBackgroundOpacityOverride(_ isOpaque: Bool) {
+        for controller in all {
+            controller.isBackgroundOpaque = isOpaque
+            controller.applyWindowTheme()
+        }
+    }
+
     func toggleBackgroundOpacity() {
         guard ghostty.config.backgroundOpacity < 1 else { return }
         guard let window, !window.styleMask.contains(.fullScreen) else { return }
 
-        isBackgroundOpaque.toggle()
-        applyWindowTheme()
+        let newValue = !isBackgroundOpaque
+
+        for controller in NSApp.windows.compactMap({ $0.windowController as? BaseTerminalController }) {
+            controller.isBackgroundOpaque = newValue
+            controller.syncAppearance()
+        }
+        Self.syncBackgroundOpacityOverride(newValue)
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {

@@ -27,11 +27,11 @@ struct CloseTerminalIntent: AppIntent {
             throw GhosttyIntentError.surfaceNotFound
         }
 
-        guard let controller = surfaceView.window?.windowController as? BaseTerminalController else {
-            return .result()
+        if let controller = surfaceView.window?.windowController as? BaseTerminalController {
+            controller.closeSurface(surfaceView, withConfirmation: false)
+        } else if let controller = surfaceView.window?.windowController as? BooController {
+            controller.state.closeSurface(surfaceView, withConfirmation: false)
         }
-
-        controller.closeSurface(surfaceView, withConfirmation: false)
         return .result()
     }
 }

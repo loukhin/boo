@@ -12,7 +12,7 @@ enum TabBarColors {
     static var barMaterial: Material {
         .bar
     }
-    
+
     /// Whether the tab bar should be transparent (let window background show through)
     static var isTransparent: Bool {
         true
