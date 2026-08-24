@@ -34,7 +34,7 @@ A file for [guiding coding agents](https://agents.md/).
 ## Boo-specific Guidelines
 
 Boo is a ghostty fork that replaces the macOS app's window/tab/split UI
-with Bonsplit. When integrating, prefer working **with** ghostty's
+with custom-built Bonsplit. When integrating, prefer working **with** ghostty's
 existing architecture instead of re-implementing pieces:
 
 - Use ghostty's `Ghostty.SurfaceWrapper` / `Ghostty.SurfaceRepresentable`
@@ -54,6 +54,8 @@ existing architecture instead of re-implementing pieces:
 
 The Boo-specific layer (`macos/Sources/Boo/**`) should be thin: it
 translates ghostty actions into Bonsplit operations and nothing more.
+
+Never run zig build unless code changes touch zig code.
 
 ## Issue and PR Guidelines
 
