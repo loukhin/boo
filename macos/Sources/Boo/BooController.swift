@@ -1486,9 +1486,14 @@ private struct BooUpdateAccessoryView: View {
         if #available(macOS 26.0, *) { 5 } else { 4 }
     }
 
+    private var titlebarVerticalOffset: CGFloat {
+        if #available(macOS 27.0, *) { -4 } else { 0 }
+    }
+
     var body: some View {
         UpdatePill(model: model)
             .padding(.top, topPadding)
             .padding(.trailing, topPadding)
+            .offset(y: titlebarVerticalOffset)
     }
 }
