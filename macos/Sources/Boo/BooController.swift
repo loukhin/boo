@@ -811,10 +811,11 @@ private struct BooTitlebarWorkspaceControls: View {
         }
         .frame(height: 28, alignment: .center)
         .padding(.leading, 8)
-        // AppKit places titlebar accessories slightly high relative to the
-        // traffic lights. Nudge the whole cluster down so the symbols sit on
-        // the same optical centerline.
-        .offset(y: 2)
+        .offset(y: titlebarVerticalOffset)
+    }
+
+    private var titlebarVerticalOffset: CGFloat {
+        if #available(macOS 27.0, *) { -2 } else { 2 }
     }
 
     private func titlebarIcon(_ systemName: String) -> some View {
