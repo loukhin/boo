@@ -9,12 +9,14 @@
 .flatpak-builder/
 zig-cache/
 .zig-cache/
+zig-pkg/
 zig-out/
+zig-pkg/
 build-cmake/
 macos/build/
 CMakeCache.txt
 CMakeFiles/
-/build.zig.zon.bak
+build.zig.zon.bak
 /result*
 /.nixos-test-history
 example/*.wasm
@@ -33,3 +35,4 @@ vgcore.*
 zig-pkg
 dist/out
 .env.release
+/sprite_face_test*

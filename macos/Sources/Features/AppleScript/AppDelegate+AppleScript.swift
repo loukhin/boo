@@ -318,8 +318,10 @@ extension NSApplication {
     /// Discovers all currently alive terminal surfaces across normal and quick
     /// terminal windows. This powers both terminal enumeration and ID lookup.
     fileprivate var allSurfaceViews: [Ghostty.SurfaceView] {
-        allTerminalControllers
+        let nativeSurfaces = allTerminalControllers
             .flatMap { $0.surfaceTree.root?.leaves() ?? [] }
+        let booSurfaces = BooController.all.flatMap { Array($0.state.surfaces.values) }
+        return nativeSurfaces + booSurfaces
     }
 
     /// All terminal controllers in undefined order.

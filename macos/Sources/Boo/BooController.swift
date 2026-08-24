@@ -25,11 +25,22 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             ?? all.last
     }
 
+    /// Finds the Boo controller that owns a surface independently of the
+    /// surface's transient AppKit window attachment.
+    static func controller(owning surface: Ghostty.SurfaceView) -> BooController? {
+        all.first { controller in
+            controller.state.surfaces.values.contains { $0 === surface }
+        }
+    }
+
     let state: BooState
     private let ghostty: Ghostty.App
     private let restorable: Bool
     private var keyDownMonitor: Any?
     private var isBackgroundOpaque = false
+    private var clipboardConfirmation: ClipboardConfirmationController?
+    private var clipboardConfirmationCancellable: AnyCancellable?
+    private var pendingClipboardFocusCancellable: AnyCancellable?
 
     override var undoManager: ExpiringUndoManager? {
         if let result = window?.undoManager as? ExpiringUndoManager {
@@ -476,6 +487,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         // app-level ghostty notifications to the key window.
         state.window = window
         state.syncWindowChromeToWindow()
+        setupClipboardConfirmationPublisher()
 
         BooController.all.append(self)
         if state.bellTabCount > 0 {
@@ -1248,6 +1260,132 @@ extension BooController {
     }
 }
 
+// MARK: - Clipboard Confirmation
+
+extension BooController: ClipboardConfirmationViewDelegate {
+    private func setupClipboardConfirmationPublisher() {
+        clipboardConfirmationCancellable = state.$surfaces
+            .map { surfaces in
+                Publishers.MergeMany(surfaces.values.map { surface in
+                    let id = surface.id
+                    return surface.$pendingClipboardConfirmation
+                        .map { (id, $0) }
+                        .eraseToAnyPublisher()
+                })
+                .eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] id, request in
+                guard let self,
+                      let surface = state.surfaces.values.first(where: { $0.id == id }) else { return }
+                onConfirmClipboardRequest(request, for: surface)
+            }
+
+        pendingClipboardFocusCancellable = state.objectWillChange
+            .sink { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.presentPendingClipboardConfirmationForFocusedSurface()
+                }
+            }
+    }
+
+    private func onConfirmClipboardRequest(
+        _ request: Ghostty.ClipboardConfirmationRequest?,
+        for target: Ghostty.SurfaceView
+    ) {
+        guard let request else {
+            guard target.pendingClipboardConfirmation == nil,
+                  let confirmation = clipboardConfirmation,
+                  confirmation.confirmation.surface === target else { return }
+            dismissClipboardConfirmation(confirmation)
+            return
+        }
+
+        guard target.pendingClipboardConfirmation === request else { return }
+
+        if let confirmation = clipboardConfirmation {
+            if confirmation.confirmation === request { return }
+            guard confirmation.confirmation.surface === target else {
+                target.pendingClipboardConfirmation = nil
+                return
+            }
+            confirmation.replaceConfirmation(with: request)
+            return
+        }
+
+        guard target.focused else {
+            if !target.bell {
+                NotificationCenter.default.post(name: .ghosttyBellDidRing, object: target)
+            }
+            return
+        }
+
+        guard state.focusedSurface === target else {
+            target.pendingClipboardConfirmation = nil
+            return
+        }
+        _ = presentClipboardConfirmation(request)
+    }
+
+    @discardableResult
+    private func presentClipboardConfirmation(
+        _ request: Ghostty.ClipboardConfirmationRequest
+    ) -> Bool {
+        guard clipboardConfirmation == nil, let window else { return false }
+
+        let confirmation = ClipboardConfirmationController(
+            confirmation: request,
+            delegate: self
+        )
+        clipboardConfirmation = confirmation
+        window.beginSheet(confirmation.window!)
+        return true
+    }
+
+    private func dismissClipboardConfirmation(
+        _ confirmation: ClipboardConfirmationController
+    ) {
+        guard clipboardConfirmation === confirmation else { return }
+        clipboardConfirmation = nil
+        if let confirmationWindow = confirmation.window {
+            window?.endSheet(confirmationWindow)
+        }
+    }
+
+    private func presentPendingClipboardConfirmationForFocusedSurface() {
+        guard let target = state.focusedSurface,
+              target.focused,
+              let request = target.pendingClipboardConfirmation else { return }
+        onConfirmClipboardRequest(request, for: target)
+    }
+
+    private func cancelPendingClipboardConfirmation(for target: Ghostty.SurfaceView) {
+        if let confirmation = clipboardConfirmation,
+           confirmation.confirmation.surface === target {
+            dismissClipboardConfirmation(confirmation)
+        }
+        target.pendingClipboardConfirmation = nil
+    }
+
+    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action) {
+        guard let confirmation = clipboardConfirmation else { return }
+        dismissClipboardConfirmation(confirmation)
+
+        switch action {
+        case .cancel:
+            confirmation.confirmation.cancel()
+        case .confirm:
+            confirmation.confirmation.complete()
+        }
+
+        if let target = confirmation.confirmation.surface,
+           target.pendingClipboardConfirmation === confirmation.confirmation {
+            target.pendingClipboardConfirmation = nil
+        }
+    }
+}
+
 // MARK: - NSWindowDelegate
 
 extension BooController: NSWindowDelegate {
@@ -1292,6 +1430,10 @@ extension BooController: NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        for surface in state.surfaces.values {
+            cancelPendingClipboardConfirmation(for: surface)
+        }
+
         BooController.all.removeAll { $0 === self }
         state.clearBellTabCountForWindowClose()
 
@@ -1305,6 +1447,9 @@ extension BooController: NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         state.setWindowKey(true)
         state.refocusCurrentSurface()
+        DispatchQueue.main.async { [weak self] in
+            self?.presentPendingClipboardConfirmationForFocusedSurface()
+        }
     }
 
     /// When the window loses key status, unfocus the surface so the cursor
@@ -1317,6 +1462,9 @@ extension BooController: NSWindowDelegate {
     func windowDidDeminiaturize(_ notification: Notification) {
         state.setWindowKey(window?.isKeyWindow == true)
         state.refocusCurrentSurface()
+        DispatchQueue.main.async { [weak self] in
+            self?.presentPendingClipboardConfirmationForFocusedSurface()
+        }
     }
 
     func windowDidEnterFullScreen(_ notification: Notification) {
@@ -1343,4 +1491,3 @@ private struct BooUpdateAccessoryView: View {
             .padding(.trailing, topPadding)
     }
 }
-

@@ -153,4 +153,3 @@ private struct BooTabPlaceholder: View {
         .background(Color(nsColor: .textBackgroundColor))
     }
 }
-

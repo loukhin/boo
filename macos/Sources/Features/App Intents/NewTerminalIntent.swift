@@ -131,7 +131,7 @@ struct NewTerminalIntent: AppIntent {
                 throw GhosttyIntentError.surfaceNotFound
             }
 
-            if let booController = parent.window?.windowController as? BooController {
+            if let booController = BooController.controller(owning: parent) {
                 let direction: SplitDirection = switch location {
                 case .splitLeft: .left
                 case .splitRight: .right
@@ -146,7 +146,7 @@ struct NewTerminalIntent: AppIntent {
                 ) {
                     return .result(value: await TerminalEntity(view: view))
                 }
-            } else if let controller = parent.window?.windowController as? BaseTerminalController {
+            } else if let controller = BaseTerminalController.controller(owning: parent) {
                 if let view = controller.newSplit(
                     at: parent,
                     direction: location.splitDirection!,

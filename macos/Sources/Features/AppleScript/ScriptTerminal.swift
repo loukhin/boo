@@ -93,11 +93,12 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
-        guard let direction = ScriptSplitDirection(code: directionCode)?.splitDirection else {
+        guard let scriptDirection = ScriptSplitDirection(code: directionCode) else {
             command.scriptErrorNumber = errAEParamMissed
             command.scriptErrorString = "Missing or unknown split direction."
             return nil
         }
+        let direction = scriptDirection.splitDirection
 
         let baseConfig: Ghostty.SurfaceConfiguration?
         if let scriptRecord = command.evaluatedArguments?["configuration"] as? NSDictionary {
@@ -112,17 +113,26 @@ final class ScriptTerminal: NSObject {
             baseConfig = nil
         }
 
-        guard let controller = surfaceView.window?.windowController as? BaseTerminalController else {
+        let newView: Ghostty.SurfaceView?
+        if let controller = BaseTerminalController.controller(owning: surfaceView) {
+            newView = controller.newSplit(
+                at: surfaceView,
+                direction: direction,
+                baseConfig: baseConfig
+            )
+        } else if let controller = BooController.controller(owning: surfaceView) {
+            newView = controller.state.splitSurface(
+                surfaceView,
+                direction: scriptDirection.booSplitDirection,
+                baseConfig: baseConfig
+            )
+        } else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Terminal is not in a splittable window."
             return nil
         }
 
-        guard let newView = controller.newSplit(
-            at: surfaceView,
-            direction: direction,
-            baseConfig: baseConfig
-        ) else {
+        guard let newView else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Failed to create split."
             return nil
@@ -142,13 +152,14 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
-        guard let controller = surfaceView.window?.windowController as? BaseTerminalController else {
+        if let controller = BaseTerminalController.controller(owning: surfaceView) {
+            controller.focusSurface(surfaceView)
+        } else if let controller = BooController.controller(owning: surfaceView) {
+            controller.state.presentSurface(surfaceView)
+        } else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Terminal is not in a window."
-            return nil
         }
-
-        controller.focusSurface(surfaceView)
         return nil
     }
 
@@ -163,13 +174,14 @@ final class ScriptTerminal: NSObject {
             return nil
         }
 
-        guard let controller = surfaceView.window?.windowController as? BaseTerminalController else {
+        if let controller = BaseTerminalController.controller(owning: surfaceView) {
+            controller.closeSurface(surfaceView, withConfirmation: false)
+        } else if let controller = BooController.controller(owning: surfaceView) {
+            controller.state.closeSurface(surfaceView, withConfirmation: false)
+        } else {
             command.scriptErrorNumber = errAEEventFailed
             command.scriptErrorString = "Terminal is not in a window."
-            return nil
         }
-
-        controller.closeSurface(surfaceView, withConfirmation: false)
         return nil
     }
 
@@ -212,6 +224,15 @@ enum ScriptSplitDirection {
     }
 
     var splitDirection: SplitTree<Ghostty.SurfaceView>.NewDirection {
+        switch self {
+        case .right: .right
+        case .left: .left
+        case .down: .down
+        case .up: .up
+        }
+    }
+
+    var booSplitDirection: SplitDirection {
         switch self {
         case .right: .right
         case .left: .left
