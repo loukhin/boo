@@ -104,7 +104,7 @@ struct PaneContainerView<Content: View>: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         // Instant show/hide — no fade animation on tab switch.
                         .opacity(isSelected ? 1 : 0)
-                        .transaction { $0.animation = nil }
+                        .animation(nil, value: isSelected)
                         .allowsHitTesting(isSelected)
                         // AppKit drag-destination routing is independent of
                         // SwiftUI hit-testing; without disabling drops on
