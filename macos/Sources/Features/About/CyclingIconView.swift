@@ -9,7 +9,7 @@ struct CyclingIconView: View {
     var body: some View {
         Image(nsImage: NSApp.applicationIconImage)
             .resizable()
-            .aspectRatio(contentMode: .fit)
+            .scaledToFit()
             .frame(height: 128)
             .accessibilityLabel("Boo Application Icon")
     }

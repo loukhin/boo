@@ -10,11 +10,15 @@ enum BooChromeColors {
     private static let chromeLightnessDelta: CGFloat = 2.8
 
     static func terminalBackgroundColor(for config: Ghostty.Config) -> Color {
-        config.backgroundColor.opacity(clampedBackgroundOpacity(for: config))
+        // The window-level glass container already applies the background tint.
+        // Painting it again in Boo's chrome obscures the shared glass effect.
+        if config.backgroundBlur.isGlassStyle { return .clear }
+        return config.backgroundColor.opacity(clampedBackgroundOpacity(for: config))
     }
 
     static func terminalChromeBackgroundColor(for config: Ghostty.Config) -> Color {
-        Color(
+        if config.backgroundBlur.isGlassStyle { return .clear }
+        return Color(
             chromeBackgroundColor(for: config)
                 .withAlphaComponent(clampedBackgroundOpacity(for: config))
         )

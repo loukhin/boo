@@ -237,7 +237,7 @@ final class BooState: ObservableObject {
 
     private func setupTabCallbacks(for controller: BonsplitController) {
         controller.onTabDragEndedOutside = { [weak self] tab, _, screenPoint in
-            self?.handleTabDraggedOutside(tab: tab, at: screenPoint)
+            self?.moveTabToNewWindow(tabId: tab.id, at: screenPoint)
         }
         controller.onTabRenameRequested = { [weak self] tab, _ in
             self?.promptTabTitle(tab.id)
@@ -253,16 +253,21 @@ final class BooState: ObservableObject {
         }
     }
 
-    /// Handle a tab being dragged outside all windows - create a new window.
-    private func handleTabDraggedOutside(tab: Tab, at screenPoint: NSPoint?) {
-        // Get the surface for this tab
-        guard let surface = surfaces[tab.id] else { return }
+    /// Route Ghostty's move-tab action through the same transfer as dragging a tab out.
+    @discardableResult
+    func moveTabToNewWindow(for surface: Ghostty.SurfaceView) -> Bool {
+        guard let tabId = tabId(for: surface) else { return false }
+        return moveTabToNewWindow(tabId: tabId, at: nil)
+    }
 
-        guard let sourceController = controllerContaining(tabId: tab.id) else { return }
+    @discardableResult
+    private func moveTabToNewWindow(tabId: TabID, at screenPoint: NSPoint?) -> Bool {
+        guard let surface = surfaces[tabId],
+              let sourceController = controllerContaining(tabId: tabId) else { return false }
 
-        // Only drag out if there's more than one tab/split total in this workspace.
+        // A lone tab in a lone workspace is already a window of its own.
         let totalTabs = sourceController.allPaneIds.reduce(0) { $0 + sourceController.tabs(inPane: $1).count }
-        guard totalTabs > 1 else { return }
+        guard totalTabs > 1 || workspaces.count > 1 else { return false }
 
         let shouldRegisterUndo = undoManager?.isUndoRegistrationEnabled == true
         let before = shouldRegisterUndo ? BooRestorableState(from: self) : nil
@@ -287,11 +292,14 @@ final class BooState: ObservableObject {
         }
         clearCommandPaletteIfNeeded(removing: surface)
 
+        // Capture window settings before Bonsplit detaches the surface view.
+        let inheritBackgroundOpacity = (window?.windowController as? BooController)?.isBackgroundOpaque
+
         // Remove from our tracking
-        let titleOverride = tabTitleOverrides.removeValue(forKey: tab.id)
-        surfaces.removeValue(forKey: tab.id)
-        surfaceSubscriptions.removeValue(forKey: tab.id)
-        sourceController.closeTab(tab.id)
+        let titleOverride = tabTitleOverrides.removeValue(forKey: tabId)
+        surfaces.removeValue(forKey: tabId)
+        surfaceSubscriptions.removeValue(forKey: tabId)
+        sourceController.closeTab(tabId)
 
         if let before {
             let after = BooRestorableState(from: self)
@@ -306,8 +314,10 @@ final class BooState: ObservableObject {
             ghostty,
             withSurface: surface,
             position: screenPoint,
-            titleOverride: titleOverride
+            titleOverride: titleOverride,
+            inheritBackgroundOpacity: inheritBackgroundOpacity
         )
+        return true
     }
 
     // MARK: - Cross-window tab transfer
@@ -448,7 +458,7 @@ final class BooState: ObservableObject {
     }
 
     /// Detach a live surface from this window so it can move to another Boo
-    /// window. Mirrors `handleTabDraggedOutside`'s bookkeeping but hands the
+    /// window. Mirrors `moveTabToNewWindow`'s bookkeeping but hands the
     /// surface back to the caller instead of spawning a new window.
     private func releaseTabForTransfer(
         _ tabId: TabID,
@@ -1678,6 +1688,39 @@ final class BooState: ObservableObject {
     private func controllerContaining(surface: Ghostty.SurfaceView) -> BonsplitController? {
         guard let tabId = tabId(for: surface) else { return nil }
         return controllerContaining(tabId: tabId)
+    }
+
+    /// Forward Boo's actual visibility to Ghostty so hidden terminals release GPU
+    /// resources and visible terminals resume rendering, even with keepAllAlive tabs.
+    func syncSurfaceOcclusionState() {
+        let visibleTabIds = Self.visibleTabIds(
+            in: workspaces,
+            activeWorkspaceId: activeWorkspaceId,
+            windowVisible: window?.occlusionState.contains(.visible) ?? false
+        )
+        for (tabId, view) in surfaces {
+            let visible = visibleTabIds.contains(tabId)
+            guard let surface = view.surface else { continue }
+            ghostty_surface_set_occlusion(surface, visible)
+            view.isWindowVisible = visible
+        }
+    }
+
+    static func visibleTabIds(
+        in workspaces: [BooWorkspace],
+        activeWorkspaceId: WorkspaceID?,
+        windowVisible: Bool
+    ) -> Set<TabID> {
+        var visibleTabIds = Set<TabID>()
+        if windowVisible, let workspace = workspaces.first(where: { $0.id == activeWorkspaceId }) {
+            let controller = workspace.controller
+            for paneId in controller.allPaneIds {
+                guard controller.zoomedPaneId == nil || controller.zoomedPaneId == paneId,
+                      let tab = controller.selectedTab(inPane: paneId) else { continue }
+                visibleTabIds.insert(tab.id)
+            }
+        }
+        return visibleTabIds
     }
 
     // MARK: - Ghostty notification wiring

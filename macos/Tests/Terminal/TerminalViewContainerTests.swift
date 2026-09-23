@@ -46,12 +46,32 @@ class MockConfig: Ghostty.Config {
 }
 
 struct TerminalViewContainerTests {
-    @Test func glassAvailability() async throws {
+    @MainActor
+    @Test func glassReloadReusesEffectAndRemovesItWhenDisabled() async throws {
+        guard #available(macOS 26.0, *) else { return }
+        let view = MockTerminalViewContainer { EmptyView() }
+        let config = MockConfig(backgroundBlur: .macosGlassRegular, backgroundColor: .black, backgroundOpacity: 0.5)
+        view.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
+        let originalEffect = try #require(view.glassEffectView)
+
+        config._backgroundBlur = .macosGlassClear
+        view.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
+        try await Task.sleep(nanoseconds: UInt64(1e8))
+        #expect(view.glassEffectView === originalEffect)
+
+        config._backgroundBlur = .disabled
+        view.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
+        try await Task.sleep(nanoseconds: UInt64(1e8))
+        #expect(view.glassEffectView == nil)
+    }
+
+    @Test(arguments: [Ghostty.Config.BackgroundBlur.macosGlassRegular, .macosGlassClear])
+    func glassAvailability(style: Ghostty.Config.BackgroundBlur) async throws {
         let view = await MockTerminalViewContainer {
             EmptyView()
         }
 
-        let config = MockConfig(backgroundBlur: .macosGlassRegular, backgroundColor: .clear, backgroundOpacity: 1)
+        let config = MockConfig(backgroundBlur: style, backgroundColor: .clear, backgroundOpacity: 1)
         await view.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
         try await Task.sleep(nanoseconds: UInt64(1e8)) // wait for the view to be setup if needed
         if #available(macOS 26.0, *) {

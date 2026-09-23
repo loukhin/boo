@@ -100,6 +100,7 @@ extern "C" {
  * | `GHOSTTY_TERMINAL_OPT_DESKTOP_NOTIFICATION`| `GhosttyTerminalDesktopNotificationFn` | Desktop notification via OSC 9 / OSC 777 |
  * | `GHOSTTY_TERMINAL_OPT_PROGRESS_REPORT`  | `GhosttyTerminalProgressReportFn` | Progress report via OSC 9;4               |
  * | `GHOSTTY_TERMINAL_OPT_UNKNOWN_SEQUENCE` | `GhosttyTerminalUnknownSequenceFn` | Unsupported sequence identifier          |
+ * | `GHOSTTY_TERMINAL_OPT_RENDER_HOLD`      | `GhosttyTerminalRenderHoldFn`     | Synchronized output (mode 2026) begins or ends |
  *
  * ### Defining a write_pty callback
  * @snippet c-vt-effects/src/main.c effects-write-pty
@@ -463,41 +464,7 @@ typedef struct {
 } GhosttyClipboardContent;
 
 /**
- * A semantic, atomic clipboard write.
- *
- * This is a sized struct. The callback must only access fields present in the
- * size reported by `size`. The request, contents array, MIME strings, and
- * data strings are all borrowed and valid only for the callback duration.
- *
- * All entries in `contents` are representations of the same logical value
- * and must be committed atomically. A `contents_len` of zero requests that
- * the destination be cleared. This is distinct from a content entry whose data
- * has zero length.
- *
- * @ingroup terminal
- */
-typedef struct {
-  /** Size of this struct in bytes. */
-  size_t size;
-
-  /** Clipboard destination. */
-  GhosttyClipboardLocation location;
-
-  /** Borrowed array of MIME representations. */
-  const GhosttyClipboardContent* contents;
-
-  /** Number of entries in contents; zero means clear the destination. */
-  size_t contents_len;
-} GhosttyClipboardWrite;
-
-/**
- * Result of a clipboard write callback.
- *
- * Protocols without write acknowledgements, including OSC 52 and iTerm2
- * OSC 1337 Copy, ignore this result. The Kitty clipboard protocol
- * (OSC 5522) acknowledges writes: each result maps to the corresponding
- * protocol status (DONE, EPERM, ENOSYS, EBUSY, EINVAL, EIO) and is
- * reported back to the running program through the write_pty callback.
+ * Result of a clipboard write reply.
  *
  * @ingroup terminal
  */
@@ -523,20 +490,125 @@ typedef enum GHOSTTY_ENUM_TYPED {
 } GhosttyClipboardWriteResult;
 
 /**
+ * The reply to a clipboard write request.
+ *
+ * This is a sized struct; set `size` to `sizeof(GhosttyClipboardWriteReply)`.
+ * The reply is borrowed only for the duration of the reply call and may be
+ * freed as soon as it returns.
+ *
+ * The result answers the program with the matching protocol status for
+ * protocols with a write acknowledgement (OSC 5522: DONE, EPERM, ENOSYS,
+ * EBUSY, EINVAL, EIO); protocols without one (OSC 52, OSC 1337 Copy)
+ * discard the reply. `remember` is ignored on any result other than
+ * GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS.
+ *
+ * @ingroup terminal
+ */
+typedef struct {
+  /** Size of this struct in bytes. */
+  size_t size;
+
+  /** Outcome of the write. */
+  GhosttyClipboardWriteResult result;
+
+  /**
+   * Record a session grant so future requests from the same program skip
+   * the permission prompt. Only honored on success when
+   * GhosttyClipboardWrite::can_remember is set.
+   */
+  bool remember;
+} GhosttyClipboardWriteReply;
+
+typedef struct GhosttyClipboardWrite GhosttyClipboardWrite;
+
+/**
+ * Function type used to answer a clipboard write request. Obtained from
+ * GhosttyClipboardWrite::reply; see that struct for the contract.
+ *
+ * @param write The request being answered
+ * @param reply The reply, borrowed only for the duration of this call
+ *
+ * @ingroup terminal
+ */
+typedef void (*GhosttyClipboardWriteReplyFn)(
+    const GhosttyClipboardWrite* write,
+    const GhosttyClipboardWriteReply* reply);
+
+/**
+ * A synchronous request to write clipboard contents.
+ *
+ * This is a sized struct. The callback must only access fields present in the
+ * size reported by `size`. The request, contents array, MIME strings, and
+ * data strings are all borrowed and valid only for the callback duration.
+ *
+ * All entries in `contents` are representations of the same logical value
+ * and must be committed atomically. A `contents_len` of zero requests that
+ * the destination be cleared. This is distinct from a content entry whose data
+ * has zero length.
+ *
+ * The write is answered by calling `reply` with this request and a
+ * GhosttyClipboardWriteReply. This must happen within the clipboard write
+ * request callback. This struct is only valid during that time. Calling 
+ * `reply` more than once is safely ignored. Returning without replying 
+ * denies the write.
+ *
+ * @ingroup terminal
+ */
+struct GhosttyClipboardWrite {
+  /** Size of this struct in bytes. */
+  size_t size;
+
+  /** Clipboard destination. */
+  GhosttyClipboardLocation location;
+
+  /** Borrowed array of MIME representations. */
+  const GhosttyClipboardContent* contents;
+
+  /** Number of entries in contents; zero means clear the destination. */
+  size_t contents_len;
+
+  /**
+   * Name of the writing program for permission prompts, if the protocol
+   * carries one. Empty otherwise.
+   */
+  GhosttyString name;
+
+  /**
+   * True if the terminal already holds a session grant for this request
+   * The embedder should skip any permission prompt and perform the write.
+   */
+  bool granted;
+
+  /**
+   * True if the program supplied a session password, so the embedder may
+   * offer to remember the user's decision through
+   * GhosttyClipboardWriteReply::remember. When false, remember is ignored.
+   */
+  bool can_remember;
+
+  /** Terminal-owned reply state. Do not access. */
+  const void* ctx;
+
+  /** Answer the write; see the struct documentation. */
+  GhosttyClipboardWriteReplyFn reply;
+};
+
+/**
  * Callback function type for clipboard_write.
  *
- * Called synchronously for a complete logical clipboard write. Protocol
- * details such as OSC 52 selectors, base64 encoding, multipart chunks,
- * aliases, and terminators are normalized before this callback is invoked.
- * OSC 52, iTerm2 OSC 1337 Copy, and Kitty clipboard (OSC 5522) writes
- * therefore use the same callback shape.
+ * The embedder may ask for permission to write or perform the write 
+ * async, but the callback itself is synchronous and the reply function
+ * must be called during the lifetime of this function. While this callback
+ * is active the VT stream is paused.
  *
- * Every invocation is one complete write: the contents replace whatever
- * the destination previously held, so there is never a partial update to
- * detect or a reset to perform. A Kitty clipboard write transaction
- * results in exactly one invocation, at commit, carrying all of the
- * transaction's MIME representations together; its protocol response is
- * generated automatically from the returned result.
+ * Answer by calling `write->reply(write, &reply)` before returning. See
+ * GhosttyClipboardWrite for the full contract. 
+ *
+ * The request may carry an optional program name requesting the write
+ * and the state of prior permission granted. If `can_remember` is set
+ * the response may set the `remember` flag and future requests from this
+ * same program will be "granted" and the embedder can skip permission
+ * requests.
  *
  * Clipboard read requests (OSC 52 "?" and OSC 5522 reads) are delivered
  * to GhosttyTerminalClipboardReadFn instead.
@@ -544,11 +616,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
  * @param terminal The terminal handle
  * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
  * @param write Borrowed atomic clipboard write request
- * @return The result of attempting the clipboard write
  *
  * @ingroup terminal
  */
-typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
+typedef void (*GhosttyTerminalClipboardWriteFn)(
     GhosttyTerminal terminal,
     void* userdata,
     const GhosttyClipboardWrite* write);
@@ -558,7 +629,7 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
  *
  * @ingroup terminal
  */
-typedef enum {
+typedef enum GHOSTTY_ENUM_TYPED {
   /** The clipboard was read; the reply carries its contents. */
   GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS = 0,
 
@@ -687,6 +758,11 @@ struct GhosttyClipboardRead {
    * True if the terminal already holds a session grant for this request
    * (kitty clipboard protocol passwords). The embedder should skip any
    * permission prompt and serve the read.
+   *
+   * Always false when mimes_len is zero: such a request is served
+   * without a prompt (see the callback docs), so the terminal never
+   * consults grants for it and a one-time password is preserved for
+   * the follow-up data read.
    */
   bool granted;
 
@@ -722,7 +798,9 @@ struct GhosttyClipboardRead {
  * state; a reply that sets `remember` records a session grant so later
  * requests with the same password arrive with `granted` set. Kitty itself
  * serves a request for only the targets listing (`list` with no `mimes`)
- * without prompting.
+ * without prompting, and embedders are expected to do the same; the
+ * terminal never consults grants for such requests (`granted` is false
+ * and one-time passwords are not consumed).
  *
  * Installing this callback also enables Kitty paste events (mode 5522):
  * ghostty_terminal_paste() sends the program an event instead of the text,
@@ -924,6 +1002,126 @@ typedef bool (*GhosttyTerminalSizeFn)(GhosttyTerminal terminal,
  */
 typedef void (*GhosttyTerminalTitleChangedFn)(GhosttyTerminal terminal,
                                               void* userdata);
+
+/**
+ * Callback function type for render_hold.
+ *
+ * Called when the running program asks the terminal to stop updating
+ * the screen, and again when it lets the screen update again. We call
+ * the time in between a "render hold".
+ *
+ * Programs use a hold to avoid flicker. A full-screen program usually
+ * redraws in several steps: clear, draw the text, move the cursor. If
+ * the screen is drawn halfway through, the user sees a broken frame. To
+ * prevent that, the program starts a hold, draws everything, and then
+ * releases the hold. The screen should keep showing the last finished
+ * frame the whole time and then switch to the new one all at once.
+ *
+ * Today the only way a program can start a hold is synchronized output
+ * (DEC private mode 2026, GHOSTTY_MODE_SYNC_OUTPUT). The callback is
+ * named for what the embedder should do rather than for that mode so
+ * that other sources of holds can be added later.
+ *
+ * ### When it is called
+ *
+ * With `held` set to true when the program sets mode 2026.
+ *
+ * With `held` set to false when the hold ends, which happens when:
+ *
+ *   - the program resets mode 2026
+ *   - the terminal is fully reset, by the program (RIS) or by
+ *     ghostty_terminal_reset()
+ *   - the terminal is resized with ghostty_terminal_resize()
+ *
+ * The two calls always come in pairs. Setting the mode while a hold is
+ * already active does nothing, and neither does resetting it when there
+ * is no hold. Changing the mode yourself with GHOSTTY_TERMINAL_OPT_MODE
+ * never invokes the callback.
+ *
+ * ### What to do
+ *
+ * When a hold begins, the terminal contains exactly the frame the
+ * program wants left on screen. Nothing after the start of the hold has
+ * been processed yet, even if more bytes follow in the same
+ * ghostty_terminal_vt_write() call. Capture that frame by calling
+ * ghostty_render_state_update() from within the callback, then stop
+ * updating the render state until the hold ends. You can keep drawing
+ * the render state in the meantime. It won't change.
+ *
+ * @code{.c}
+ * typedef struct {
+ *   GhosttyRenderState render_state;
+ *   bool held;
+ *   uint64_t hold_started_ms;
+ * } Renderer;
+ *
+ * void on_render_hold(GhosttyTerminal terminal, void* userdata, bool held) {
+ *   Renderer* r = userdata;
+ *   if (held) {
+ *     // Capture the frame the program wants left on screen.
+ *     ghostty_render_state_update(r->render_state, terminal);
+ *     r->hold_started_ms = now_ms();
+ *   }
+ *   r->held = held;
+ * }
+ *
+ * void draw(Renderer* r, GhosttyTerminal terminal) {
+ *   // Give up on a program that holds the screen for too long.
+ *   if (r->held && now_ms() - r->hold_started_ms >= 1000) {
+ *     GhosttyTerminalModeConfig mode = {
+ *       .mode = GHOSTTY_MODE_SYNC_OUTPUT,
+ *       .value = false,
+ *     };
+ *     ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode);
+ *     r->held = false;
+ *   }
+ *
+ *   // During a hold, skip the update and draw the captured frame.
+ *   if (!r->held) ghostty_render_state_update(r->render_state, terminal);
+ *   draw_render_state(r->render_state);
+ * }
+ * @endcode
+ *
+ * ### Timeouts
+ *
+ * The terminal has no clock, so it never ends a hold on its own. A
+ * program that crashes or forgets to release its hold would freeze the
+ * screen forever, so you need a timeout like the one above. One second
+ * is a common choice. When it expires, reset the mode yourself and go
+ * back to updating normally. Because setting the mode again during a
+ * hold does nothing, a program can't keep pushing your deadline back.
+ *
+ * ### Why a callback
+ *
+ * You could instead check GHOSTTY_MODE_SYNC_OUTPUT before each draw
+ * and skip the update when it is set. That is simpler, but it has two
+ * problems. First, the frame left on screen is whatever you happened to
+ * draw last, which can be older than what the program intended or even
+ * a half-drawn frame. Second, if the program releases a hold and starts
+ * the next one between two of your draws, you never see the mode turn
+ * off and the finished frame in between is lost. A program that draws
+ * continuously can then appear frozen. Capturing the frame when each
+ * hold begins avoids both.
+ *
+ * ### Other notes
+ *
+ * You are free to ignore a hold whenever showing live content matters
+ * more, such as when the user scrolls or starts a selection.
+ *
+ * Like every callback, this runs on the thread that called
+ * ghostty_terminal_vt_write(). If another thread draws the render
+ * state, protect the update in the callback the same way you protect
+ * any other access to the render state.
+ *
+ * @param terminal The terminal handle
+ * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
+ * @param held True when a hold begins, false when it ends
+ *
+ * @ingroup terminal
+ */
+typedef void (*GhosttyTerminalRenderHoldFn)(GhosttyTerminal terminal,
+                                            void* userdata,
+                                            bool held);
 
 /**
  * Callback function type for pwd_changed.
@@ -1445,6 +1643,66 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: GhosttyTerminalClipboardReadFn
    */
   GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ = 38,
+
+  /**
+   * Set the maximum total decoded bytes a single Kitty clipboard protocol
+   * (OSC 5522) write transaction may accumulate. The limit is captured
+   * when a transaction begins; an in-flight transaction keeps the limit
+   * it started with.
+   *
+   * Data beyond the limit fails the whole transaction with EFBIG. The
+   * transaction is discarded, later write-related packets are ignored
+   * until a new write begins, and nothing reaches the clipboard write
+   * callback.
+   *
+   * Transactions are buffered in memory, so this limit bounds how much
+   * memory a single write can make the terminal allocate. Pass SIZE_MAX
+   * to remove the limit. A NULL value pointer reverts to the built-in
+   * default of 64MiB, the minimum required by the protocol.
+   *
+   * This limit doesn't apply to OSC 52 writes, which are bounded by the
+   * maximum length of an escape sequence instead.
+   *
+   * Input type: size_t*
+   */
+  GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES = 39,
+
+  /**
+   * Set whether a resize may pull rows out of scrollback back into the
+   * active area.
+   *
+   * When true, growing rows reveals scrollback if the cursor is on the
+   * bottom row, and a column reflow that needs fewer rows reveals
+   * scrollback as well. When false, growing rows always appends blank rows
+   * at the bottom and a column reflow keeps the top of the active area on
+   * the same content, so a line that is fully in scrollback stays there. A
+   * soft-wrapped line with at least one row still in the active area may
+   * still unwrap back into view.
+   *
+   * Set this to false when the pty keeps its own screen buffer without
+   * scrollback, since it cannot pull rows back and will otherwise disagree
+   * with the terminal about the screen contents after a resize. Windows
+   * ConPTY is the motivating case.
+   *
+   * This is preserved across a full reset (RIS).
+   *
+   * A NULL value pointer resets to the built-in default of true.
+   *
+   * Input type: bool*
+   */
+  GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK = 40,
+
+  /**
+   * Callback invoked when the running program asks the terminal to
+   * stop updating the screen and when it allows updates again. Today
+   * this is driven by synchronized output (mode 2026). Set to NULL to
+   * ignore these events.
+   *
+   * See GhosttyTerminalRenderHoldFn for how to use this in a renderer.
+   *
+   * Input type: GhosttyTerminalRenderHoldFn
+   */
+  GHOSTTY_TERMINAL_OPT_RENDER_HOLD = 41,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 
@@ -1842,6 +2100,15 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Output type: bool *
    */
   GHOSTTY_TERMINAL_DATA_CURSOR_AT_PROMPT = 39,
+
+  /**
+   * The configured maximum decoded bytes per Kitty clipboard protocol
+   * (OSC 5522) write transaction. See
+   * GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.
+   *
+   * Output type: size_t *
+   */
+  GHOSTTY_TERMINAL_DATA_CLIPBOARD_WRITE_MAX_BYTES = 40,
   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalData;
 
@@ -1884,6 +2151,9 @@ GHOSTTY_API void ghostty_terminal_free(GhosttyTerminal terminal);
  * modes, scrollback, scrolling region, and screen contents. The terminal
  * dimensions are preserved.
  *
+ * If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD
+ * callback is invoked to report that the hold ended.
+ *
  * @param terminal The terminal handle (may be NULL, in which case this is a no-op)
  *
  * @ingroup terminal
@@ -1901,6 +2171,9 @@ GHOSTTY_API void ghostty_terminal_reset(GhosttyTerminal terminal);
  * protocols and size reports), disables synchronized output mode (allowed
  * by the spec so that resize results are shown immediately), and sends an
  * in-band size report if mode 2048 is enabled.
+ *
+ * If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD
+ * callback is invoked to report that the hold ended.
  *
  * @param terminal The terminal handle (NULL returns GHOSTTY_INVALID_VALUE)
  * @param cols New width in cells (must be greater than zero)
@@ -2067,7 +2340,8 @@ GHOSTTY_API GhosttyResult ghostty_terminal_continuation_buf(
  * The returned bytes are allocated with allocator, or the default allocator
  * when allocator is NULL. The caller must release them with ghostty_free(),
  * passing the same allocator and returned length. An empty continuation is a
- * successful zero-length allocation.
+ * successful result with *out_ptr set to NULL and *out_len set to zero,
+ * which can also be passed to ghostty_free().
  * Continuation tracking must have been enabled by setting
  * GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES to a nonzero value before the
  * input that produced the continuation was written.

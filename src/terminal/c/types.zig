@@ -41,6 +41,7 @@ const paste = @import("paste.zig");
 const render = @import("render.zig");
 const result = @import("result.zig");
 const row = @import("row.zig");
+const search = @import("search.zig");
 const selection = @import("selection.zig");
 const selection_gesture = @import("selection_gesture.zig");
 const size_report = @import("size_report.zig");
@@ -178,6 +179,7 @@ const type_decls = [_]TypeDecl{
     .initStruct("GhosttyClipboardRead", terminal.ClipboardRead),
     .initStruct("GhosttyClipboardReadReply", terminal.ClipboardReadReply),
     .initStruct("GhosttyClipboardWrite", terminal.ClipboardWrite),
+    .initStruct("GhosttyClipboardWriteReply", terminal.ClipboardWriteReply),
     .initStruct("GhosttyCodepoints", Codepoints),
     .initStruct("GhosttyColorPaletteMask", color_c.PaletteMask),
     .initStruct("GhosttyColorRgb", color.RGB.C),
@@ -203,6 +205,7 @@ const type_decls = [_]TypeDecl{
     .initStruct("GhosttyRenderStateCursor", render.Cursor),
     .initStruct("GhosttyRenderStateRowSelection", render.RowSelection),
     .initStruct("GhosttySelection", selection.CSelection),
+    .initStruct("GhosttySelectionBuffer", selection.CSelectionBuffer),
     .initStruct("GhosttySelectionGestureBehaviors", selection_gesture.Behaviors),
     .initStruct("GhosttySelectionGestureGeometry", selection_gesture.Geometry),
     .initTaggedStruct("GhosttySgrAttribute", sgr.Attribute.C, "tag", "value", .generated),
@@ -247,7 +250,7 @@ const type_decls = [_]TypeDecl{
     .initEnum("GhosttyCellWide", cell.Wide, "GHOSTTY_CELL_WIDE_"),
     .initEnum("GhosttyClipboardLocation", clipboard.Location, "GHOSTTY_CLIPBOARD_LOCATION_"),
     .initEnum("GhosttyClipboardReadResult", clipboard.Read.Status, "GHOSTTY_CLIPBOARD_READ_RESULT_"),
-    .initEnum("GhosttyClipboardWriteResult", clipboard.WriteResult, "GHOSTTY_CLIPBOARD_WRITE_RESULT_"),
+    .initEnum("GhosttyClipboardWriteResult", clipboard.Write.Status, "GHOSTTY_CLIPBOARD_WRITE_RESULT_"),
     .initEnum("GhosttyColorScheme", device_status.ColorScheme, "GHOSTTY_COLOR_SCHEME_"),
     .initEnum("GhosttyFocusEvent", focus_pkg.Event, "GHOSTTY_FOCUS_"),
     .initEnum("GhosttyFormatterFormat", formatter_pkg.Format, "GHOSTTY_FORMATTER_FORMAT_"),
@@ -286,6 +289,10 @@ const type_decls = [_]TypeDecl{
     .initEnum("GhosttyRenderStateRowOption", render.RowOption, "GHOSTTY_RENDER_STATE_ROW_OPTION_"),
     .initEnum("GhosttyRowData", row.RowData, "GHOSTTY_ROW_DATA_"),
     .initEnum("GhosttyRowSemanticPrompt", row.SemanticPrompt, "GHOSTTY_ROW_SEMANTIC_"),
+    .initEnum("GhosttySearchData", search.Data, "GHOSTTY_SEARCH_DATA_"),
+    .initEnum("GhosttySearchOption", search.Option, "GHOSTTY_SEARCH_OPT_"),
+    .initEnum("GhosttySearchScroll", search.Scroll, "GHOSTTY_SEARCH_SCROLL_"),
+    .initEnum("GhosttySearchStatus", search.Status, "GHOSTTY_SEARCH_STATUS_"),
     .initEnum("GhosttySelectionAdjust", Selection.Adjustment, "GHOSTTY_SELECTION_ADJUST_"),
     .initEnum("GhosttySelectionGestureAutoscroll", selection_gesture.Autoscroll, "GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_"),
     .initEnum("GhosttySelectionGestureBehavior", selection_gesture.Behavior, "GHOSTTY_SELECTION_GESTURE_BEHAVIOR_"),
@@ -332,6 +339,7 @@ const type_decls = [_]TypeDecl{
     .initOpaque("GhosttyRenderState"),
     .initOpaque("GhosttyRenderStateRowCells"),
     .initOpaque("GhosttyRenderStateRowIterator"),
+    .initOpaque("GhosttySearch"),
     .initOpaque("GhosttySelectionGesture"),
     .initOpaque("GhosttySelectionGestureEvent"),
     .initOpaque("GhosttySgrParser"),

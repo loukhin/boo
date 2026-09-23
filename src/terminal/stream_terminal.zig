@@ -81,10 +81,15 @@ pub const Handler = struct {
     kitty_clipboard_write: ?*kitty_clipboard.WriteState = null,
 
     /// Kitty clipboard protocol (OSC 5522) session password grants,
-    /// recorded when a clipboard_read reply asks to remember the user's
-    /// decision. Later requests carrying a granted password are forwarded
-    /// with `granted` set so the embedder can skip its prompt.
+    /// recorded when a clipboard_read or clipboard_write reply asks to
+    /// remember the user's decision.
     kitty_clipboard_grants: kitty_clipboard.Grants = .{},
+
+    /// Maximum total decoded bytes accumulated by one Kitty clipboard
+    /// protocol (OSC 5522) write transaction, captured when the
+    /// transaction begins. Data beyond the limit fails the transaction
+    /// with EFBIG.
+    kitty_clipboard_write_max_bytes: usize = kitty_clipboard.max_write_size,
 
     /// Called for sequence identifiers not supported by this library.
     /// Currently, only APC is reported. Content is borrowed and only valid
@@ -161,26 +166,8 @@ pub const Handler = struct {
         /// Called when the running program reports progress via OSC 9;4.
         progress_report: ?*const fn (*Handler, osc.Command.ProgressReport) void,
 
-        /// Called when the running program writes to a clipboard. The write
-        /// has a normalized destination and one or more decoded MIME
-        /// representations. All request, MIME, and data memory is borrowed
-        /// and only valid for the duration of the callback.
-        ///
-        /// A write with no contents clears the destination. A content entry
-        /// with empty data is a distinct empty representation.
-        ///
-        /// OSC 52, OSC 1337 Copy, and Kitty clipboard (OSC 5522) writes all
-        /// share this callback. Every call is one complete write whose
-        /// contents replace whatever the destination previously held; there
-        /// is never a partial update. A Kitty clipboard write transaction
-        /// results in exactly one call, at commit, carrying all of the
-        /// transaction's representations, and the returned result is
-        /// reported back to the running program as the commit status (see
-        /// kittyClipboard).
-        ///
-        /// Clipboard read requests (OSC 52 with a "?" payload and OSC 5522
-        /// reads) are delivered to clipboard_read instead.
-        clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
+        /// Called when the running program writes to a clipboard.
+        clipboard_write: ?*const fn (*Handler, clipboard.Write) void,
 
         /// Called when the running program requests clipboard contents
         /// (OSC 52 with a "?" payload, or a Kitty clipboard (OSC 5522)
@@ -214,6 +201,33 @@ pub const Handler = struct {
         /// is 256 bytes; longer strings will be silently ignored.
         xtversion: ?*const fn (*Handler) []const u8,
 
+        /// Called with `true` when the running program asks the terminal
+        /// to stop updating the screen, and with `false` when it allows
+        /// updates again. The time in between is a "render hold". Programs
+        /// use a hold so that the user never sees a half-drawn frame.
+        ///
+        /// Today the only source of a hold is synchronized output (mode
+        /// 2026). The hold begins when VT input sets the mode. It ends
+        /// when VT input resets the mode, on a full reset, and on a resize
+        /// through `Handler.resize`. The calls always come in pairs:
+        /// setting the mode during a hold does nothing, and neither does
+        /// resetting it when there is no hold. Writing `terminal.modes`
+        /// directly never calls this.
+        ///
+        /// When a hold begins, nothing after the sequence that began it
+        /// has been processed yet, so the terminal contains exactly the
+        /// frame the program wants left on screen. A renderer can capture
+        /// that frame from within this callback (e.g. `RenderState.update`)
+        /// and then skip updates until the hold ends. Checking the mode
+        /// before each draw instead can't do this. It leaves whatever was
+        /// drawn last on screen, and it loses a finished frame entirely
+        /// when one hold ends and the next begins between two draws.
+        ///
+        /// The terminal has no clock so it never ends a hold on its own.
+        /// The caller must use a timeout so that a program that never
+        /// releases its hold can't freeze the screen.
+        render_hold: ?*const fn (*Handler, bool) void,
+
         /// No effects means that the stream effectively becomes readonly
         /// that only affects pure terminal state and ignores all side
         /// effects beyond that.
@@ -228,6 +242,7 @@ pub const Handler = struct {
             .enquiry = null,
             .progress_report = null,
             .size = null,
+            .render_hold = null,
             .title_changed = null,
             .pwd_changed = null,
             .write_pty = null,
@@ -267,7 +282,10 @@ pub const Handler = struct {
     /// because it also handles the side effects like mode 2048 in-band
     /// size reports if write_pty is set.
     pub fn resize(self: *Handler, value: Terminal.Resize) !void {
+        // Resize always turns off synchronized output, ending its hold.
+        const sync = self.terminal.modes.get(.synchronized_output);
         try self.terminal.resize(self.terminal.gpa(), value);
+        if (sync) self.renderHold(false);
 
         // Mode 2048 reports require complete, current cell pixel geometry.
         const cell_size = value.cell_size_px orelse return;
@@ -425,7 +443,16 @@ pub const Handler = struct {
             .reset_mode => try self.setMode(value.mode, false),
             .save_mode => self.terminal.modes.save(value.mode),
             .restore_mode => {
+                const prev = self.terminal.modes.get(value.mode);
                 const v = self.terminal.modes.restore(value.mode);
+
+                // Restore writes the value directly. Put the old value
+                // back for synchronized output so that setMode can see
+                // the change and report the render hold.
+                if (value.mode == .synchronized_output) {
+                    self.terminal.modes.set(value.mode, prev);
+                }
+
                 try self.setMode(value.mode, v);
             },
             .top_and_bottom_margin => self.terminal.setTopAndBottomMargin(value.top_left, value.bottom_right),
@@ -464,7 +491,10 @@ pub const Handler = struct {
             .active_status_display => self.terminal.status_display = value,
             .decaln => try self.terminal.decaln(),
             .full_reset => {
+                // A reset turns off synchronized output, ending its hold.
+                const sync = self.terminal.modes.get(.synchronized_output);
                 self.terminal.fullReset();
+                if (sync) self.renderHold(false);
 
                 // Full reset clears grants
                 self.kitty_clipboard_grants.deinit(self.terminal.gpa());
@@ -661,30 +691,53 @@ pub const Handler = struct {
 
         // OSC 52 uses an empty payload to clear the selected clipboard.
         if (data.len == 0) {
-            _ = func(self, .{
+            func(self, .{
                 .location = location,
                 .contents = &.{},
+                .name = "",
+                .granted = false,
+                .can_remember = false,
+                .reply_ctx = self,
+                .reply_fn = &ignoreWriteReply,
             });
             return;
         }
 
         // Decode the base64 payload with the SIMD decoder (the same one
-        // used for Kitty graphics payloads) rather than the scalar std
-        // implementation; clipboard payloads can be megabytes.
+        // used for Kitty clipboard payloads) rather than the scalar std
+        // implementation; clipboard payloads can be megabytes. The
+        // Kitty clipboard spec governs OSC 52 base64 handling too: a
+        // request with characters outside the base64 alphabet is
+        // discarded entirely (never partially decoded), while a
+        // missing-padding tail is tolerated since OSC 52 has no way
+        // to report errors to the client.
         const alloc = self.terminal.gpa();
         const buf = try alloc.alloc(u8, simd.base64.maxLen(data));
         defer alloc.free(buf);
-        const decoded = try simd.base64.decode(data, buf);
+        const decoded = simd.base64.decodeStrict(data, buf, .optional) catch {
+            log.warn("OSC 52 clipboard write is not valid base64, ignoring", .{});
+            return;
+        };
 
         const contents = [_]clipboard.Content{.{
             .mime = "text/plain",
             .data = decoded,
         }};
-        _ = func(self, .{
+        func(self, .{
             .location = location,
             .contents = &contents,
+            .name = "",
+            .granted = false,
+            .can_remember = false,
+            .reply_ctx = self,
+            .reply_fn = &ignoreWriteReply,
         });
     }
+
+    /// Reply target for clipboard writes on protocols without a write
+    /// acknowledgement (OSC 52, OSC 1337 Copy): the reply is accepted
+    /// and discarded.
+    fn ignoreWriteReply(_: *anyopaque, _: clipboard.Write.Result) void {}
 
     fn clipboardRead(
         self: *Handler,
@@ -782,10 +835,24 @@ pub const Handler = struct {
         // Decode and validate the metadata.
         var arena: std.heap.ArenaAllocator = .init(self.terminal.gpa());
         defer arena.deinit();
-        const meta = (try kitty_clipboard.Metadata.parse(
+        const meta = (kitty_clipboard.Metadata.parse(
             arena.allocator(),
             v.metadata,
-        )) orelse return;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidValue => {
+                const state = self.kitty_clipboard_write orelse return;
+                switch (kitty_clipboard.Metadata.operation(v.metadata) orelse return) {
+                    .wdata, .walias => self.kittyClipboardFinish(
+                        state,
+                        .EINVAL,
+                        v.terminator,
+                    ),
+                    .read, .write => {},
+                }
+                return;
+            },
+        }) orelse return;
 
         const payload = v.payload orelse "";
         switch (meta.op) {
@@ -813,6 +880,7 @@ pub const Handler = struct {
             error.Invalid => return,
         };
         defer decoded.deinit(alloc);
+        if (!decoded.isValidUtf8()) return;
 
         // Without a clipboard_read effect nothing can serve the read.
         // EPERM is the protocol's denial so clients degrade gracefully.
@@ -848,9 +916,14 @@ pub const Handler = struct {
         };
 
         // Per the spec a password without a name is no password. A
-        // stored grant for it lets the embedder skip its prompt.
+        // stored grant for it lets the embedder skip its prompt. A
+        // prompt-exempt request never consults the grants: the
+        // embedder serves it without a prompt anyway, and consuming a
+        // one-time paste password on a listing would burn the grant
+        // before the follow-up data read.
         const pw: []const u8 = if (meta.name.len > 0) meta.pw else "";
-        const granted = self.kitty_clipboard_grants.use(alloc, pw, .read);
+        const granted = !kitty_clipboard.readPromptExempt(mimes.len) and
+            self.kitty_clipboard_grants.use(alloc, pw, .read);
 
         var state: KittyClipboardReadState = .{
             .handler = self,
@@ -1009,7 +1082,9 @@ pub const Handler = struct {
         const alloc = self.terminal.gpa();
         const state = try alloc.create(kitty_clipboard.WriteState);
         errdefer alloc.destroy(state);
-        state.* = try .init(alloc, meta);
+        state.* = try .init(alloc, meta, .{
+            .max_size = self.kitty_clipboard_write_max_bytes,
+        });
         self.kitty_clipboard_write = state;
     }
 
@@ -1043,6 +1118,21 @@ pub const Handler = struct {
                 );
                 return error.OutOfMemory;
             },
+
+            // Data over the write limit aborts the transaction and is
+            // reported to the client.
+            error.TooLarge => self.kittyClipboardFinish(
+                state,
+                .EFBIG,
+                terminator,
+            ),
+
+            // An invalid base64 payload stream aborts the transaction.
+            error.Invalid => self.kittyClipboardFinish(
+                state,
+                .EINVAL,
+                terminator,
+            ),
         };
     }
 
@@ -1052,10 +1142,15 @@ pub const Handler = struct {
         payload: []const u8,
         terminator: osc.Terminator,
     ) error{OutOfMemory}!void {
-        // Aliases without a transaction or without a target MIME type
-        // are silently ignored.
+        // Aliases without a transaction are silently ignored. Once a
+        // transaction exists, a missing target MIME type is invalid and
+        // aborts the transaction.
         const state = self.kitty_clipboard_write orelse return;
-        if (meta.mime.len == 0) return;
+        if (meta.mime.len == 0) return self.kittyClipboardFinish(
+            state,
+            .EINVAL,
+            terminator,
+        );
 
         state.alias(
             self.terminal.gpa(),
@@ -1091,30 +1186,96 @@ pub const Handler = struct {
                 self.kittyClipboardFinish(state, .EIO, terminator);
                 return error.OutOfMemory;
             },
+
+            // The last MIME type's payload stream was not correctly
+            // padded, which aborts the transaction.
+            error.Invalid => {
+                self.kittyClipboardFinish(state, .EINVAL, terminator);
+                return;
+            },
         };
         defer committed.deinit(alloc);
 
-        // The effect result maps 1:1 onto the protocol's commit
-        // statuses. The effect can't be null here (checked when the
-        // transaction began) but if an embedder cleared it
-        // mid-transaction that's ENOSYS.
-        const result: clipboard.WriteResult = if (self.effects.clipboard_write) |func|
-            func(self, .{
-                .location = committed.loc,
-                .contents = committed.contents,
-            })
-        else
-            .unsupported;
+        // The effect can't be null here (checked when the transaction
+        // began) but if an embedder cleared it mid-transaction that's
+        // ENOSYS.
+        const func = self.effects.clipboard_write orelse {
+            self.kittyClipboardFinish(state, .ENOSYS, terminator);
+            return;
+        };
 
-        self.kittyClipboardFinish(state, switch (result) {
-            .success => .DONE,
-            .denied => .EPERM,
-            .unsupported => .ENOSYS,
-            .busy => .EBUSY,
-            .invalid_data => .EINVAL,
-            .io_error, _ => .EIO,
-        }, terminator);
+        // Per the spec a password without a name is no password. A
+        // stored grant for it lets the embedder skip its prompt.
+        const pw: []const u8 = if (committed.name.len > 0) committed.pw else "";
+        const granted = self.kitty_clipboard_grants.use(alloc, pw, .write);
+
+        var reply_state: KittyClipboardWriteReplyState = .{
+            .handler = self,
+            .pw = pw,
+        };
+        func(self, .{
+            .location = committed.loc,
+            .contents = committed.contents,
+            .name = committed.name,
+            .granted = granted,
+            .can_remember = pw.len > 0,
+            .reply_ctx = &reply_state,
+            .reply_fn = &KittyClipboardWriteReplyState.reply,
+        });
+
+        // The program is waiting on the commit status, so a callback
+        // that returned without a reply is answered as a denial rather
+        // than silence.
+        self.kittyClipboardFinish(
+            state,
+            reply_state.status orelse .EPERM,
+            terminator,
+        );
     }
+
+    /// Reply state for one synchronous Kitty clipboard write. This lives
+    /// on the kittyClipboardCommit stack frame, so it is only valid
+    /// during the callback.
+    const KittyClipboardWriteReplyState = struct {
+        handler: *Handler,
+
+        /// The effective password, empty when the request had none.
+        pw: []const u8,
+
+        /// The replied commit status, mapped 1:1 from the reply result;
+        /// null until the callback replies.
+        status: ?kitty_clipboard.Status = null,
+
+        fn reply(ctx: *anyopaque, result: clipboard.Write.Result) void {
+            const self: *KittyClipboardWriteReplyState = @ptrCast(@alignCast(ctx));
+            if (self.status != null) {
+                log.warn("clipboard write replied more than once, ignoring", .{});
+                return;
+            }
+            self.status = switch (result) {
+                .denied => .EPERM,
+                .unsupported => .ENOSYS,
+                .busy => .EBUSY,
+                .invalid_data => .EINVAL,
+                .io_error => .EIO,
+                .success => |success| status: {
+                    // Remembering is only offered when the request
+                    // carried a usable password.
+                    if (success.remember and self.pw.len > 0) {
+                        self.handler.kitty_clipboard_grants.grant(
+                            self.handler.terminal.gpa(),
+                            self.pw,
+                            .write,
+                            false,
+                        ) catch |err| {
+                            log.warn("error recording clipboard grant err={}", .{err});
+                        };
+                    }
+                    break :status .DONE;
+                },
+            };
+        }
+    };
 
     /// Answer a write transaction with its final status and drop it.
     /// The id echoed is the one from the transaction's opening write
@@ -1384,13 +1545,22 @@ pub const Handler = struct {
     }
 
     fn requestMode(self: *Handler, mode: modes.Mode) void {
-        const report = self.terminal.modes.getReport(.fromMode(mode));
+        var report = self.terminal.modes.getReport(.fromMode(mode));
+
+        // Kitty paste events (mode 5522) can't work without a clipboard
+        // read effect, so if that isn't set mark it as unrecognized.
+        if (mode == .kitty_paste_events and
+            self.effects.clipboard_read == null)
+        {
+            report.state = .not_recognized;
+        }
+
         self.sendModeReport(report);
     }
 
     fn requestModeUnknown(self: *Handler, mode_raw: u16, ansi: bool) void {
         const report = self.terminal.modes.getReport(.{
-            .value = @truncate(mode_raw),
+            .value = mode_raw,
             .ansi = ansi,
         });
         self.sendModeReport(report);
@@ -1433,7 +1603,24 @@ pub const Handler = struct {
         }
     }
 
+    /// Report that a render hold began or ended. See `Effects.render_hold`.
+    inline fn renderHold(self: *Handler, held: bool) void {
+        const func = self.effects.render_hold orelse return;
+        func(self, held);
+    }
+
     fn setMode(self: *Handler, mode: modes.Mode, enabled: bool) !void {
+        // Synchronized output is reported as a render hold. We only report
+        // real changes. Reporting a set during a hold would be harmful
+        // because the screen is half-drawn at that point and the callback
+        // is expected to capture it.
+        if (mode == .synchronized_output) {
+            if (self.terminal.modes.get(mode) == enabled) return;
+            self.terminal.modes.set(mode, enabled);
+            self.renderHold(enabled);
+            return;
+        }
+
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
@@ -1467,7 +1654,9 @@ pub const Handler = struct {
                 if (enabled) .@"132_cols" else .@"80_cols",
             ),
 
-            .synchronized_output,
+            // Handled above
+            .synchronized_output => unreachable,
+
             .linefeed,
             .focus_event,
             => {},
@@ -1796,6 +1985,102 @@ const PtyWriter = struct {
         return consumed;
     }
 };
+
+test "render hold effect fires on synchronized output transitions only" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var events: [8]bool = undefined;
+        var len: usize = 0;
+
+        fn hold(_: *Handler, held: bool) void {
+            events[len] = held;
+            len += 1;
+        }
+    };
+    S.len = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.render_hold = &S.hold;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Reset without a hold is ignored
+    s.nextSlice("\x1b[?2026l");
+    try testing.expectEqual(0, S.len);
+
+    // A set during a hold is ignored since the screen is half-drawn
+    s.nextSlice("\x1b[?2026hA\x1b[?2026hB\x1b[?2026l\x1b[?2026l");
+    try testing.expectEqualSlices(bool, &.{ true, false }, S.events[0..S.len]);
+
+    // Save and restore report the same way as set and reset
+    S.len = 0;
+    s.nextSlice("\x1b[?2026s\x1b[?2026h\x1b[?2026r\x1b[?2026r");
+    try testing.expectEqualSlices(bool, &.{ true, false }, S.events[0..S.len]);
+    try testing.expect(!t.modes.get(.synchronized_output));
+
+    // Full reset
+    S.len = 0;
+    s.nextSlice("\x1b[?2026h\x1bc\x1bc");
+    try testing.expectEqualSlices(bool, &.{ true, false }, S.events[0..S.len]);
+
+    // Resize
+    S.len = 0;
+    s.nextSlice("\x1b[?2026h");
+    try s.handler.resize(.{ .cols = 80, .rows = 24 });
+    try s.handler.resize(.{ .cols = 80, .rows = 24 });
+    try testing.expectEqualSlices(bool, &.{ true, false }, S.events[0..S.len]);
+}
+
+test "render hold effect can snapshot the frame when the hold begins" {
+    const alloc = testing.allocator;
+    const RenderState = @import("render.zig").RenderState;
+    var t: Terminal = try .init(testing.io, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // This is how a renderer is expected to use the effect: capture the
+    // frame when the hold begins and then leave the render state alone
+    // until the hold ends.
+    const S = struct {
+        var state: RenderState = .empty;
+        var snapshots: usize = 0;
+
+        fn hold(h: *Handler, held: bool) void {
+            if (!held) return;
+            state.update(testing.allocator, h.terminal) catch unreachable;
+            snapshots += 1;
+        }
+
+        fn char(y: usize, x: usize) u21 {
+            return state.row_data.items(.cells)[y].get(x).raw.codepoint();
+        }
+    };
+    S.state = .empty;
+    S.snapshots = 0;
+    defer S.state.deinit(alloc);
+
+    var handler: Handler = .init(&t);
+    handler.effects.render_hold = &S.hold;
+    var s: Stream = .init(.{ .allocator = alloc, .handler = handler });
+    defer s.deinit();
+
+    // Normal output, the start of a hold, and part of the next frame all
+    // arrive in one write with no draw in between. The captured frame
+    // must have all of the output before the hold and none after.
+    s.nextSlice("AB\x1b[?2026h\x1b[HXY");
+    try testing.expectEqual(1, S.snapshots);
+    try testing.expectEqual('A', S.char(0, 0));
+    try testing.expectEqual('B', S.char(0, 1));
+
+    // The frame is finished and the next hold begins before we ever
+    // draw. The finished frame must be captured, not lost.
+    s.nextSlice("Z\x1b[?2026l\x1b[?2026h\x1b[H123");
+    try testing.expectEqual(2, S.snapshots);
+    try testing.expectEqual('X', S.char(0, 0));
+    try testing.expectEqual('Y', S.char(0, 1));
+    try testing.expectEqual('Z', S.char(0, 2));
+}
 
 test "resize clears synchronized output on unchanged cell dimensions" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
@@ -3242,7 +3527,7 @@ test "clipboard_write effect callback" {
 
     const S = struct {
         var count: usize = 0;
-        var result: clipboard.WriteResult = .success;
+        var result: clipboard.Write.Result = .{ .success = .{} };
         var last_location: clipboard.Location = .standard;
         var last_contents_len: usize = 0;
         var last_mime: ?[]u8 = null;
@@ -3256,7 +3541,7 @@ test "clipboard_write effect callback" {
             last_contents_len = 0;
         }
 
-        fn clipboardWrite(_: *Handler, write: clipboard.Write) clipboard.WriteResult {
+        fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
             clearCapture();
             count += 1;
             last_location = write.location;
@@ -3267,7 +3552,7 @@ test "clipboard_write effect callback" {
                 last_data = testing.allocator.dupe(u8, write.contents[0].data) catch
                     @panic("failed to capture clipboard data");
             }
-            return result;
+            write.reply(result);
         }
     };
     S.count = 0;
@@ -3293,6 +3578,9 @@ test "clipboard_write effect callback" {
         .{ .sequence = "\x1B]52;0;Y3V0\x1B\\", .location = .standard, .data = "cut" },
         .{ .sequence = "\x1B]52;x;ZmFsbGJhY2s=\x1B\\", .location = .standard, .data = "fallback" },
         .{ .sequence = "\x1B]52;c;YQBi\x1B\\", .location = .standard, .data = "a\x00b" },
+        // Missing padding is tolerated for OSC 52 since it has no way
+        // to report errors to the client, matching kitty.
+        .{ .sequence = "\x1B]52;c;dW5wYWRkZWQ\x1B\\", .location = .standard, .data = "unpadded" },
     };
 
     for (cases, 1..) |case, expected_count| {
@@ -3312,9 +3600,14 @@ test "clipboard_write effect callback" {
     try testing.expect(S.last_mime == null);
     try testing.expect(S.last_data == null);
 
-    // Reads and malformed base64 are ignored.
+    // Reads and malformed base64 are ignored. The whole request is
+    // discarded on invalid characters (including whitespace) rather
+    // than decoding around them, per the Kitty clipboard spec that
+    // governs OSC 52 base64 handling.
     s.nextSlice("\x1B]52;c;?\x1B\\");
     s.nextSlice("\x1B]52;c;***\x1B\\");
+    s.nextSlice("\x1B]52;c;SGVs!!!bG8=\x1B\\");
+    s.nextSlice("\x1B]52;c;aGVs bG8=\x1B\\");
     try testing.expectEqual(@as(usize, cases.len + 1), S.count);
 
     // OSC 1337 Copy shares the normalized clipboard write path.
@@ -3333,9 +3626,9 @@ test "clipboard_write effect callback" {
     try testing.expectEqualStrings("text/plain", S.last_mime.?);
     try testing.expectEqualStrings("fragmented", S.last_data.?);
 
-    // Callback results are intentionally ignored for protocols without a
-    // write acknowledgement. The denied result above did not stop later writes.
-    try testing.expectEqual(clipboard.WriteResult.denied, S.result);
+    // Reply results are intentionally ignored for protocols without a
+    // write acknowledgement. The denied reply above did not stop later writes.
+    try testing.expect(S.result == .denied);
 }
 
 test "clipboard_read effect callback" {
@@ -3459,9 +3752,9 @@ test "clipboard_write allocation failure is ignored" {
     const S = struct {
         var count: usize = 0;
 
-        fn clipboardWrite(_: *Handler, _: clipboard.Write) clipboard.WriteResult {
+        fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
             count += 1;
-            return .success;
+            write.reply(.{ .success = .{} });
         }
     };
     S.count = 0;
@@ -3489,14 +3782,21 @@ test "clipboard_write allocation failure is ignored" {
 const KittyClipboardCapture = struct {
     var responses: [1024]u8 = undefined;
     var responses_len: usize = 0;
+
+    // Write capture. A null write_result returns without replying.
     var write_count: usize = 0;
-    var result: clipboard.WriteResult = .success;
+    var write_result: ?clipboard.Write.Result = .{ .success = .{} };
+    var write_reply_twice: bool = false;
     var last_location: clipboard.Location = .standard;
     var last_contents_len: usize = 0;
     var last_mimes: [8][64]u8 = undefined;
     var last_mime_lens: [8]usize = @splat(0);
     var last_data: [8][256]u8 = undefined;
     var last_data_lens: [8]usize = @splat(0);
+    var last_write_name: [64]u8 = undefined;
+    var last_write_name_len: usize = 0;
+    var last_write_granted: bool = false;
+    var last_write_can_remember: bool = false;
 
     // Read capture. A null read_result returns without replying.
     var read_count: usize = 0;
@@ -3515,11 +3815,15 @@ const KittyClipboardCapture = struct {
     fn reset() void {
         responses_len = 0;
         write_count = 0;
-        result = .success;
+        write_result = .{ .success = .{} };
+        write_reply_twice = false;
         last_location = .standard;
         last_contents_len = 0;
         last_mime_lens = @splat(0);
         last_data_lens = @splat(0);
+        last_write_name_len = 0;
+        last_write_granted = false;
+        last_write_can_remember = false;
         read_count = 0;
         read_result = null;
         read_reply_twice = false;
@@ -3537,7 +3841,7 @@ const KittyClipboardCapture = struct {
         responses_len += data.len;
     }
 
-    fn clipboardWrite(_: *Handler, write: clipboard.Write) clipboard.WriteResult {
+    fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
         write_count += 1;
         last_location = write.location;
         last_contents_len = write.contents.len;
@@ -3547,7 +3851,12 @@ const KittyClipboardCapture = struct {
             last_data_lens[i] = content.data.len;
             @memcpy(last_data[i][0..content.data.len], content.data);
         }
-        return result;
+        last_write_name_len = write.name.len;
+        @memcpy(last_write_name[0..write.name.len], write.name);
+        last_write_granted = write.granted;
+        last_write_can_remember = write.can_remember;
+        if (write_result) |r| write.reply(r);
+        if (write_reply_twice) write.reply(.io_error);
     }
 
     fn clipboardRead(_: *Handler, read: clipboard.Read) void {
@@ -3577,6 +3886,10 @@ const KittyClipboardCapture = struct {
 
     fn readName() []const u8 {
         return last_read_name[0..last_read_name_len];
+    }
+
+    fn writeName() []const u8 {
+        return last_write_name[0..last_write_name_len];
     }
 
     fn mimeAt(i: usize) []const u8 {
@@ -3647,20 +3960,22 @@ test "kitty clipboard write result maps to response status" {
     defer s.deinit();
 
     const cases = [_]struct {
-        result: clipboard.WriteResult,
+        result: ?clipboard.Write.Result,
         response: []const u8,
     }{
-        .{ .result = .success, .response = "\x1B]5522;type=write:status=DONE\x1B\\" },
+        .{ .result = .{ .success = .{} }, .response = "\x1B]5522;type=write:status=DONE\x1B\\" },
         .{ .result = .denied, .response = "\x1B]5522;type=write:status=EPERM\x1B\\" },
         .{ .result = .unsupported, .response = "\x1B]5522;type=write:status=ENOSYS\x1B\\" },
         .{ .result = .busy, .response = "\x1B]5522;type=write:status=EBUSY\x1B\\" },
         .{ .result = .invalid_data, .response = "\x1B]5522;type=write:status=EINVAL\x1B\\" },
         .{ .result = .io_error, .response = "\x1B]5522;type=write:status=EIO\x1B\\" },
+        // No reply at all is a denial rather than silence.
+        .{ .result = null, .response = "\x1B]5522;type=write:status=EPERM\x1B\\" },
     };
 
     for (cases) |case| {
         S.reset();
-        S.result = case.result;
+        S.write_result = case.result;
 
         // An immediately-committed write with no data is a clear.
         s.nextSlice("\x1B]5522;type=write\x1B\\");
@@ -3670,6 +3985,16 @@ test "kitty clipboard write result maps to response status" {
         try testing.expectEqualStrings(case.response, S.responseSlice());
     }
 
+    // A second reply is ignored.
+    S.reset();
+    S.write_reply_twice = true;
+    s.nextSlice("\x1B]5522;type=write\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=DONE\x1B\\",
+        S.responseSlice(),
+    );
+
     // The response echoes the request terminator, unlike kitty which
     // always uses ST.
     S.reset();
@@ -3678,6 +4003,18 @@ test "kitty clipboard write result maps to response status" {
     try testing.expectEqual(clipboard.Location.primary, S.last_location);
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=DONE\x07",
+        S.responseSlice(),
+    );
+
+    // A system without a primary selection answers a loc=primary write
+    // with ENOSYS, echoing the id.
+    S.reset();
+    S.write_result = .unsupported;
+    s.nextSlice("\x1B]5522;type=write:loc=primary:id=p1\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(clipboard.Location.primary, S.last_location);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=ENOSYS:id=p1\x1B\\",
         S.responseSlice(),
     );
 }
@@ -3903,10 +4240,13 @@ test "kitty clipboard read password grants" {
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
+    // Every read requests a data type ("text/plain"): a request with
+    // no data types never consults the grants at all.
+    //
     // pw="secret", name="app": the first request isn't granted but the
     // reply may ask to remember it.
     S.read_result = .{ .success = .{ .remember = true } };
-    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expectEqual(@as(usize, 1), S.read_count);
     try testing.expectEqualStrings("app", S.readName());
     try testing.expect(!S.last_read_granted);
@@ -3914,33 +4254,129 @@ test "kitty clipboard read password grants" {
 
     // The same password is now granted; a different one is not.
     S.read_result = .{ .success = .{} };
-    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expect(S.last_read_granted);
-    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expect(!S.last_read_granted);
     try testing.expect(S.last_read_can_remember);
 
     // A password without a name doesn't count: it is neither granted
     // nor rememberable, even if the reply asks.
     S.read_result = .{ .success = .{ .remember = true } };
-    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expectEqualStrings("", S.readName());
     try testing.expect(!S.last_read_granted);
     try testing.expect(!S.last_read_can_remember);
-    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expect(!S.last_read_can_remember);
     S.read_result = .{ .success = .{} };
-    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:pw=b3RoZXI=:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expect(!S.last_read_granted);
 
     // A grant is advisory: the request is still forwarded and the
     // embedder may deny it.
     S.responses_len = 0;
     S.read_result = .denied;
-    s.nextSlice("\x1B]5522;type=read:id=d:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=read:id=d:pw=c2VjcmV0:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
     try testing.expect(S.last_read_granted);
     try testing.expectEqualStrings(
         "\x1B]5522;type=read:status=EPERM:id=d\x1B\\",
+        S.responseSlice(),
+    );
+
+    // Grants are freed with the stream (the testing allocator catches
+    // the leak otherwise).
+}
+
+test "kitty clipboard read targets-only never consumes a one-time grant" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_read = &S.clipboardRead;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // A one-time read grant, as minted for a paste event.
+    try s.handler.kitty_clipboard_grants.grant(testing.allocator, "otp", .read, true);
+
+    // A targets-only read (payload ".") is prompt-exempt so it never
+    // consults, and must not burn, the one-time password.
+    S.read_result = .{ .success = .{} };
+    s.nextSlice("\x1B]5522;type=read:pw=b3Rw:name=YXBw;Lg==\x1B\\");
+    try testing.expectEqual(@as(usize, 1), S.read_count);
+    try testing.expect(S.last_read_list);
+    try testing.expectEqual(@as(usize, 0), S.last_read_mimes_len);
+    try testing.expect(!S.last_read_granted);
+
+    // The follow-up data read still consumes the grant, exactly once.
+    s.nextSlice("\x1B]5522;type=read:pw=b3Rw:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
+    try testing.expect(S.last_read_granted);
+    s.nextSlice("\x1B]5522;type=read:pw=b3Rw:name=YXBw;dGV4dC9wbGFpbg==\x1B\\");
+    try testing.expect(!S.last_read_granted);
+}
+
+test "kitty clipboard write password grants" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    handler.effects.clipboard_read = &S.clipboardRead;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // pw="secret", name="app": the first commit isn't granted but the
+    // reply may ask to remember it.
+    S.write_result = .{ .success = .{ .remember = true } };
+    s.nextSlice("\x1B]5522;type=write:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expectEqualStrings("app", S.writeName());
+    try testing.expect(!S.last_write_granted);
+    try testing.expect(S.last_write_can_remember);
+
+    // The same password is now granted; a different one is not.
+    S.write_result = .{ .success = .{} };
+    s.nextSlice("\x1B]5522;type=write:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expect(S.last_write_granted);
+    s.nextSlice("\x1B]5522;type=write:pw=b3RoZXI=:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expect(!S.last_write_granted);
+    try testing.expect(S.last_write_can_remember);
+
+    // Directions are independent: a write grant doesn't satisfy reads.
+    S.read_result = .{ .success = .{} };
+    s.nextSlice("\x1B]5522;type=read:pw=c2VjcmV0:name=YXBw\x1B\\");
+    try testing.expect(!S.last_read_granted);
+
+    // A password without a name doesn't count: it is neither granted
+    // nor rememberable, even if the reply asks.
+    S.write_result = .{ .success = .{ .remember = true } };
+    s.nextSlice("\x1B]5522;type=write:pw=c2VjcmV0\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqualStrings("", S.writeName());
+    try testing.expect(!S.last_write_granted);
+    try testing.expect(!S.last_write_can_remember);
+
+    // A grant is advisory: the request is still forwarded and the
+    // embedder may deny it.
+    S.responses_len = 0;
+    S.write_result = .denied;
+    s.nextSlice("\x1B]5522;type=write:id=d:pw=c2VjcmV0:name=YXBw\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expect(S.last_write_granted);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EPERM:id=d\x1B\\",
         S.responseSlice(),
     );
 
@@ -4008,7 +4444,121 @@ test "kitty clipboard new write replaces in-flight transaction" {
     );
 }
 
-test "kitty clipboard invalid walias payload aborts with EINVAL" {
+test "kitty clipboard invalid write packets abort with EINVAL" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    const invalid_packets = [_][]const u8{
+        // Alias payload decodes to a non-UTF-8 byte.
+        "\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;/w==\x1B\\",
+        // Alias has no target MIME type.
+        "\x1B]5522;type=walias;VEVYVA==\x1B\\",
+        // Alias target MIME decodes to non-UTF-8 bytes.
+        "\x1B]5522;type=walias:mime=//4=;VEVYVA==\x1B\\",
+        // Write data MIME decodes to non-UTF-8 bytes.
+        "\x1B]5522;type=wdata:mime=//4=;R2hvc3Q=\x1B\\",
+    };
+
+    for (invalid_packets) |packet| {
+        S.responses_len = 0;
+        s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+        s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1B\\");
+        s.nextSlice(packet);
+        try testing.expectEqualStrings(
+            "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+            S.responseSlice(),
+        );
+        try testing.expect(!s.handler.semantic_failure);
+
+        // The transaction is gone: a commit does nothing further.
+        s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+        try testing.expectEqual(@as(usize, 0), S.write_count);
+        try testing.expectEqualStrings(
+            "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+            S.responseSlice(),
+        );
+    }
+}
+
+test "kitty clipboard invalid read text does not abort a write" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+    S.read_result = .{ .success = .{} };
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_read = &S.clipboardRead;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1B\\");
+
+    // The read payload decodes to a non-UTF-8 byte. It is dropped without
+    // invoking the clipboard effect or disturbing the write transaction.
+    s.nextSlice("\x1B]5522;type=read;/w==\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.read_count);
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=DONE:id=w\x1B\\",
+        S.responseSlice(),
+    );
+}
+
+test "kitty clipboard oversized text write aborts with EFBIG" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Shrink the limit so the test doesn't have to stream the
+    // default 64MiB.
+    s.handler.kitty_clipboard_write_max_bytes = 4;
+
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbA==\x1B\\"); // "Hell"
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bw==\x1B\\"); // "o"
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EFBIG:id=w\x1B\\",
+        S.responseSlice(),
+    );
+    try testing.expect(!s.handler.semantic_failure);
+
+    // The transaction is gone: later data and the commit do nothing.
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;IQ==\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EFBIG:id=w\x1B\\",
+        S.responseSlice(),
+    );
+}
+
+test "kitty clipboard invalid wdata chunk aborts with EINVAL" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
@@ -4022,15 +4572,16 @@ test "kitty clipboard invalid walias payload aborts with EINVAL" {
     defer s.deinit();
 
     s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
-    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\x1B\\");
-    s.nextSlice("\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;!!!\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbG8=\x1B\\"); // "Hello"
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;!!!bad!!!\x1B\\");
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
         S.responseSlice(),
     );
     try testing.expect(!s.handler.semantic_failure);
 
-    // The transaction is gone: a commit does nothing further.
+    // The transaction is gone: later data and the commit do nothing.
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;V29ybGQ=\x1B\\"); // "World"
     s.nextSlice("\x1B]5522;type=wdata\x1B\\");
     try testing.expectEqual(@as(usize, 0), S.write_count);
     try testing.expectEqualStrings(
@@ -4039,7 +4590,7 @@ test "kitty clipboard invalid walias payload aborts with EINVAL" {
     );
 }
 
-test "kitty clipboard invalid wdata chunk is skipped" {
+test "kitty clipboard wdata chunks split one base64 stream" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
@@ -4052,18 +4603,47 @@ test "kitty clipboard invalid wdata chunk is skipped" {
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
+    // "some data" encoded as one stream, split at non-group
+    // boundaries across packets.
     s.nextSlice("\x1B]5522;type=write\x1B\\");
-    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbG8=\x1B\\"); // "Hello"
-    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;!!!bad!!!\x1B\\");
-    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;V29ybGQ=\x1B\\"); // "World"
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;c29\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;tZSBk\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;YXRh\x1B\\");
     s.nextSlice("\x1B]5522;type=wdata\x1B\\");
 
     try testing.expectEqual(@as(usize, 1), S.write_count);
-    try testing.expectEqualStrings("HelloWorld", S.dataAt(0));
+    try testing.expectEqualStrings("some data", S.dataAt(0));
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=DONE\x1B\\",
         S.responseSlice(),
     );
+}
+
+test "kitty clipboard unpadded wdata stream aborts at commit" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // "Hello" without its final padding byte: every packet decodes,
+    // but the stream ends mid-group so the commit reports EINVAL.
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbG8\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+        S.responseSlice(),
+    );
+    try testing.expect(!s.handler.semantic_failure);
 }
 
 test "kitty clipboard in-flight transaction is freed on deinit" {
@@ -4152,6 +4732,7 @@ test "request mode DECRQM with write_pty callback" {
 
         // DECRQM for mode 7 (wraparound) — should be silently ignored
         s.nextSlice("\x1B[?7$p");
+        s.nextSlice("\x1B[4$p");
     }
 
     t.fullReset();
@@ -4183,6 +4764,12 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?7$p");
         try testing.expectEqualStrings("\x1B[?7;2$y", S.last_response.?);
 
+        // A large unknown mode must not alias wraparound mode 7.
+        const before = t.modes;
+        s.nextSlice("\x1B[?32775$p");
+        try testing.expectEqualStrings("\x1B[?32775;0$y", S.last_response.?);
+        try testing.expectEqualDeep(before, t.modes);
+
         // Query an unknown mode
         s.nextSlice("\x1B[?9999$p");
         try testing.expectEqualStrings("\x1B[?9999;0$y", S.last_response.?);
@@ -4190,6 +4777,65 @@ test "request mode DECRQM with write_pty callback" {
         // Query DECECM, which Ghostty recognizes but does not allow changing
         s.nextSlice("\x1B[?117$p");
         try testing.expectEqualStrings("\x1B[?117;4$y", S.last_response.?);
+    }
+}
+
+test "request mode DECRQM ANSI responses" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var response: [32]u8 = undefined;
+        var len: usize = 0;
+        var calls: usize = 0;
+
+        fn writePty(_: *Handler, data: []const u8) void {
+            @memcpy(response[0..data.len], data);
+            len = data.len;
+            calls += 1;
+        }
+    };
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    inline for (.{
+        .{ "2", modes.Mode.disable_keyboard },
+        .{ "4", modes.Mode.insert },
+        .{ "12", modes.Mode.send_receive_mode },
+        .{ "20", modes.Mode.linefeed },
+    }) |mode| {
+        inline for (.{ false, true, false }) |enabled| {
+            s.nextSlice("\x1b[" ++ mode[0] ++ (if (enabled) "h" else "l"));
+            try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            const query = "\x1b[" ++ mode[0] ++ "$p";
+            for (0..query.len + 1) |split| {
+                S.calls = 0;
+                S.len = 0;
+                s.nextSlice(query[0..split]);
+                if (split < query.len) try testing.expectEqual(0, S.calls);
+                s.nextSlice(query[split..]);
+                try testing.expectEqual(1, S.calls);
+                try testing.expectEqualStrings("\x1b[" ++ mode[0] ++ (if (enabled) ";1$y" else ";2$y"), S.response[0..S.len]);
+                try testing.expectEqual(enabled, t.modes.get(mode[1]));
+            }
+        }
+    }
+
+    // The two namespaces must report independent states for mode 4.
+    s.nextSlice("\x1b[4h\x1b[?4l");
+    const cases = .{
+        .{ "\x1b[4$p", "\x1b[4;1$y" },
+        .{ "\x1b[?4$p", "\x1b[?4;2$y" },
+        .{ "\x1b[9999$p", "\x1b[9999;0$y" },
+    };
+    inline for (cases) |case| {
+        S.calls = 0;
+        S.len = 0;
+        s.nextSlice(case[0]);
+        try testing.expectEqual(1, S.calls);
+        try testing.expectEqualStrings(case[1], S.response[0..S.len]);
     }
 }
 
@@ -5185,10 +5831,10 @@ test "continuation reconstructs standard stream without duplicate effects" {
 
         fn clipboardWrite(
             _: *Handler,
-            _: clipboard.Write,
-        ) clipboard.WriteResult {
+            write: clipboard.Write,
+        ) void {
             clipboard_count += 1;
-            return .success;
+            write.reply(.{ .success = .{} });
         }
 
         fn reset() void {
@@ -6041,7 +6687,7 @@ test "paste: mode 5522 without entropy fails and records no grant" {
     try testing.expectEqualStrings("hello", S.written.items);
 }
 
-test "paste: mode 5522 is settable and reported in the lib build" {
+test "paste: mode 5522 DECRQM requires clipboard read effect" {
     if (comptime build_options.artifact != .lib) return error.SkipZigTest;
 
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
@@ -6056,18 +6702,34 @@ test "paste: mode 5522 is settable and reported in the lib build" {
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
-    // Recognized and reset by default, so programs can detect support.
+    // A paste event is unusable if its follow-up read can't be served, so
+    // the mode isn't advertised without a clipboard read effect.
     s.nextSlice("\x1B[?5522$p");
-    try testing.expectEqualStrings("\x1B[?5522;2$y", S.written.items);
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
 
     S.reset();
     s.nextSlice("\x1B[?5522h");
     try testing.expect(t.modes.get(.kitty_paste_events));
     s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
+
+    // Installing the effect makes the current mode state reportable.
+    S.reset();
+    s.handler.effects.clipboard_read = &S.clipboardRead;
+    s.nextSlice("\x1B[?5522$p");
     try testing.expectEqualStrings("\x1B[?5522;1$y", S.written.items);
 
+    S.reset();
     s.nextSlice("\x1B[?5522l");
     try testing.expect(!t.modes.get(.kitty_paste_events));
+    s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;2$y", S.written.items);
+
+    // Removing the effect stops advertising the capability again.
+    S.reset();
+    s.handler.effects.clipboard_read = null;
+    s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
 }
 
 test "full reset drops kitty clipboard grants" {

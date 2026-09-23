@@ -62,6 +62,9 @@ struct BooRootView: View {
         .environment(\.terminalChromeBackgroundColor, state.terminalChromeBackgroundColor)
         .environment(\.isWindowKey, state.isWindowKey)
         .frame(minWidth: 600, minHeight: 400)
+        .onChange(of: state.activeWorkspaceId, initial: true) { _, _ in
+            state.syncSurfaceOcclusionState()
+        }
     }
 
     private func workspaceView(_ workspace: BooWorkspace) -> some View {
@@ -90,6 +93,9 @@ struct BooRootView: View {
                         surface: surface,
                         isSelected: isSelected
                     )
+                    .onChange(of: isSelected, initial: true) { _, _ in
+                        state.syncSurfaceOcclusionState()
+                    }
                     // NOTE: we intentionally do NOT use `.id(surface)` here.
                     // With `keepAllAlive` mode, tabs live in ForEach inside
                     // different pane ZStacks. When a tab moves between panes,
@@ -103,6 +109,9 @@ struct BooRootView: View {
                 }
             }
         )
+        .onChange(of: workspace.controller.zoomedPaneId) { _, _ in
+            state.syncSurfaceOcclusionState()
+        }
     }
 }
 

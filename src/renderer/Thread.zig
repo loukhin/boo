@@ -13,7 +13,6 @@ const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
 const terminalpkg = @import("../terminal/main.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
-const App = @import("../App.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -22,14 +21,6 @@ const CURSOR_BLINK_INTERVAL = 600;
 
 /// Whether calls to `drawFrame` must be done from the app thread.
 ///
-/// If this is `true` then we send a `redraw_surface` message to the apprt
-/// whenever we need to draw instead of calling `drawFrame` directly.
-const must_draw_from_app_thread =
-    if (@hasDecl(apprt.App, "must_draw_from_app_thread"))
-        apprt.App.must_draw_from_app_thread
-    else
-        false;
-
 /// The type used for sending messages to the IO thread. For now this is
 /// hardcoded with a capacity. We can make this a comptime parameter in
 /// the future if we want it configurable.
@@ -88,9 +79,6 @@ state: *rendererpkg.State,
 /// this is a blocking queue so if it is full you will get errors (or block).
 mailbox: *Mailbox,
 
-/// Mailbox to send messages to the app thread
-app_mailbox: App.Mailbox,
-
 /// Configuration we need derived from the main config.
 config: DerivedConfig,
 
@@ -131,7 +119,6 @@ pub fn init(
     surface: *apprt.Surface,
     renderer_impl: *rendererpkg.Renderer,
     state: *rendererpkg.State,
-    app_mailbox: App.Mailbox,
 ) !Thread {
     // Create our event loop.
     var loop = try xev.Loop.init(.{});
@@ -174,7 +161,6 @@ pub fn init(
         .renderer = renderer_impl,
         .state = state,
         .mailbox = mailbox,
-        .app_mailbox = app_mailbox,
     };
 
     // Only enable compression if we have it enabled... save some
@@ -479,15 +465,8 @@ fn drawFrame(self: *Thread, now: bool) void {
     // when we're forced to via `now`.
     if (!now and self.renderer.hasVsync()) return;
 
-    if (must_draw_from_app_thread) {
-        _ = self.app_mailbox.push(
-            .{ .redraw_surface = self.surface },
-            .{ .instant = {} },
-        );
-    } else {
-        self.renderer.drawFrame(false) catch |err|
-            log.warn("error drawing err={}", .{err});
-    }
+    self.renderer.drawFrame(false) catch |err|
+        log.warn("error drawing err={}", .{err});
 }
 
 fn wakeupCallback(
@@ -571,6 +550,17 @@ fn renderCallback(
         log.warn("render callback fired without data set", .{});
         return .disarm;
     };
+
+    // If the display is now unrealized, release GPU resources now
+    // we're on the render thread, and do not try to update and draw
+    // this frame.
+    if (!t.renderer.display_realized) {
+        t.renderer.draw_mutex.lockUncancelable(global.io());
+        defer t.renderer.draw_mutex.unlock(global.io());
+
+        t.renderer.releaseGpuResources();
+        return .disarm;
+    }
 
     // If we're not visible there's no point spending CPU rebuilding cells —
     // we'll catch up when the .visible mailbox message flips us back on.

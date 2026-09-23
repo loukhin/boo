@@ -37,7 +37,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     private let ghostty: Ghostty.App
     private let restorable: Bool
     private var keyDownMonitor: Any?
-    private var isBackgroundOpaque = false
+    private(set) var isBackgroundOpaque = false
     private var clipboardConfirmation: ClipboardConfirmationController?
     private var clipboardConfirmationCancellable: AnyCancellable?
     private var pendingClipboardFocusCancellable: AnyCancellable?
@@ -410,6 +410,9 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             defer: false
         )
         window.title = "Boo"
+        // Boo owns tabs through Bonsplit. Never let AppKit group newly-created
+        // windows (including Services/App Intents windows) into native tabs.
+        window.tabbingMode = .disallowed
         window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
@@ -427,7 +430,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         window.delegate = self
 
         let root = BooRootView(state: state)
-        window.contentView = NSHostingView(rootView: root)
+        window.contentView = TerminalViewContainer { root }
 
         // Set autosave name AFTER content view to prevent SwiftUI override.
         window.setFrameAutosaveName("BooWindow")
@@ -599,13 +602,22 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         }
 
         applyTitlebarBackground(color: chromeBackgroundColor)
+        // Glass is a window-level effect behind the entire Boo layout, not a
+        // per-surface effect. Reuse Ghostty's container for both setup and reloads.
+        (window.contentView as? TerminalViewContainer)?.ghosttyConfigDidChange(
+            ghostty.config,
+            preferredBackgroundColor: nil
+        )
     }
 
     private func applyTitlebarBackground(color: NSColor) {
         guard let titlebarContainer else { return }
         let opacity = isBackgroundOpaque ? 1 : max(0.001, BooChromeColors.clampedBackgroundOpacity(for: ghostty.config))
         titlebarContainer.wantsLayer = true
-        titlebarContainer.layer?.backgroundColor = color.withAlphaComponent(opacity).cgColor
+        let usesGlass = ghostty.config.backgroundBlur.isGlassStyle && !isBackgroundOpaque
+        titlebarContainer.layer?.backgroundColor = usesGlass
+            ? NSColor.clear.cgColor
+            : color.withAlphaComponent(opacity).cgColor
     }
 
     private var titlebarContainer: NSView? {
@@ -1239,10 +1251,38 @@ extension BooController {
         state.resizeCurrentSplit(direction: .right)
     }
 
+    // Keep find actions reachable when the search field, rather than the
+    // terminal NSView, is first responder (matching BaseTerminalController).
+    @IBAction func find(_ sender: Any) {
+        state.focusedSurface?.find(sender)
+    }
+
+    @IBAction func selectionForFind(_ sender: Any) {
+        state.focusedSurface?.selectionForFind(sender)
+    }
+
+    @IBAction func scrollToSelection(_ sender: Any) {
+        state.focusedSurface?.scrollToSelection(sender)
+    }
+
+    @IBAction func findNext(_ sender: Any) {
+        state.focusedSurface?.findNext(sender)
+    }
+
+    @IBAction func findPrevious(_ sender: Any) {
+        state.focusedSurface?.findPrevious(sender)
+    }
+
+    @IBAction func findHide(_ sender: Any) {
+        state.focusedSurface?.findHide(sender)
+    }
+
     // MARK: - Menu Validation
 
     @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
+        case #selector(findHide(_:)):
+            return state.focusedSurface?.searchState != nil
         case #selector(splitZoom(_:)):
             return state.canToggleSplitZoom()
         case #selector(equalizeSplits(_:)):
@@ -1369,7 +1409,7 @@ extension BooController: ClipboardConfirmationViewDelegate {
         target.pendingClipboardConfirmation = nil
     }
 
-    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action) {
+    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action, remember: Bool) {
         guard let confirmation = clipboardConfirmation else { return }
         dismissClipboardConfirmation(confirmation)
 
@@ -1377,7 +1417,7 @@ extension BooController: ClipboardConfirmationViewDelegate {
         case .cancel:
             confirmation.confirmation.cancel()
         case .confirm:
-            confirmation.confirmation.complete()
+            confirmation.confirmation.complete(remember: remember)
         }
 
         if let target = confirmation.confirmation.surface,
@@ -1441,6 +1481,10 @@ extension BooController: NSWindowDelegate {
         // Update cascade point like Ghostty does so the next window
         // cascades from the remaining key window.
         BooWindowSizing.updateCascadePoint(closing: window)
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        state.syncSurfaceOcclusionState()
     }
 
     /// When the window becomes key, refocus the current surface so the
