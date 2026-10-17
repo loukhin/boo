@@ -1674,6 +1674,9 @@ extension Ghostty {
             item.setImageIfDesired(systemSymbolName: "rectangle.bottomhalf.inset.filled")
             item = menu.addItem(withTitle: "Split Up", action: #selector(splitUp(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.tophalf.inset.filled")
+            menu.addItem(.separator())
+            item = menu.addItem(withTitle: "Close Split", action: #selector(closeSurface(_:)), keyEquivalent: "")
+            item.setImageIfDesired(systemSymbolName: "xmark.rectangle")
 
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Toggle Split Zoom", action: #selector(toggleSplitZoom(_:)), keyEquivalent: "")
@@ -1828,6 +1831,10 @@ extension Ghostty {
             ghostty_surface_split(surface, GHOSTTY_SPLIT_DIRECTION_UP)
         }
 
+        @IBAction func closeSurface(_ sender: Any?) {
+            performBindingAction("close_surface")
+        }
+
         @objc func toggleSplitZoom(_ sender: Any?) {
             performBindingAction("toggle_split_zoom")
         }
@@ -1855,7 +1862,7 @@ extension Ghostty {
         private func performBindingAction(_ action: String) {
             guard let surface = self.surface else { return }
             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
-                AppDelegate.logger.warning("action failed action=\(action)")
+                AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
             }
         }
 
@@ -2487,7 +2494,9 @@ extension Ghostty.SurfaceView {
 
         if let content {
             DispatchQueue.main.async {
-                self.surfaceModel?.sendText(content)
+                // Dropped text is untrusted, so it goes through the same
+                // paste protection as a clipboard paste.
+                self.surfaceModel?.pasteText(content)
             }
             return true
         }

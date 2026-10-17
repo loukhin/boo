@@ -435,11 +435,7 @@ final class BooController: NSWindowController, NSMenuItemValidation {
         // Set autosave name AFTER content view to prevent SwiftUI override.
         window.setFrameAutosaveName("BooWindow")
 
-        window.isRestorable = restorable
-        if restorable {
-            window.restorationClass = BooWindowRestoration.self
-            window.identifier = BooWindowRestoration.restorationIdentifier
-        }
+        syncRestoration()
 
         // Apply initial window theme
         applyWindowTheme()
@@ -655,10 +651,25 @@ final class BooController: NSWindowController, NSMenuItemValidation {
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
+        // Only app-level reloads (nil object) affect window restoration;
+        // surface-scoped config changes don't.
+        let isAppConfig = notification.object == nil
+
         // Delay slightly to ensure config values are updated
         DispatchQueue.main.async { [weak self] in
+            if isAppConfig { self?.syncRestoration() }
             self?.applyWindowTheme()
         }
+    }
+
+    /// Updates the window's restoration policy from the app configuration.
+    /// Mirrors upstream `TerminalController.syncRestoration(_:)`.
+    private func syncRestoration() {
+        guard let window else { return }
+        // Setting all three of these is required for restoration to work.
+        window.isRestorable = restorable && ghostty.config.windowSaveState != "never"
+        window.restorationClass = BooWindowRestoration.self
+        window.identifier = BooWindowRestoration.restorationIdentifier
     }
 
     @objc private func onToggleFullscreen(_ notification: Notification) {
@@ -693,6 +704,36 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             size: defaultSize
         )
         window.setFrame(frame, display: true, animate: true)
+    }
+
+    /// Resize the window so that the given surface is the given size (CSI 8 t),
+    /// keeping any zero dimension as is. Mirrors upstream
+    /// `TerminalController.resizeWindow(_:to:)`: only done when the surface is
+    /// the only terminal in the window (across all workspaces, tabs, and
+    /// panes), since otherwise it would resize other terminals too.
+    func resizeWindow(_ surfaceView: Ghostty.SurfaceView, to size: NSSize) -> Bool {
+        guard let window,
+              let screen = window.screen ?? NSScreen.main,
+              state.surfaces.count == 1,
+              state.surfaces.values.first === surfaceView,
+              !surfaceView.inspectorVisible,
+              !window.styleMask.contains(.fullScreen) else { return false }
+
+        // Resize the window by the change in surface size so the tab bar,
+        // sidebar, and titlebar are accounted for.
+        let dw = size.width > 0 ? size.width - surfaceView.frame.width : 0
+        let dh = size.height > 0 ? size.height - surfaceView.frame.height : 0
+
+        // Clamp to the screen first so the terminal is only resized once, and
+        // keep the top-left corner in place (the origin is the bottom-left).
+        let visible = screen.visibleFrame
+        var frame = window.frame
+        frame.size.width = min(frame.width + dw, visible.width)
+        frame.size.height = min(frame.height + dh, visible.height)
+        frame.origin.y = window.frame.maxY - frame.height
+        window.setFrame(frame, display: true)
+        window.constrainToScreen()
+        return true
     }
 
     @objc private func applicationWillTerminate(_ notification: Notification) {
