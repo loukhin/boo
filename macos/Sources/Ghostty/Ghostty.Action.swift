@@ -110,6 +110,58 @@ extension Ghostty.Action {
         let progress: UInt8?
     }
 
+    /// One program status record (OSC 7501). The core keeps the records and
+    /// always sends the complete current set, so consumers just replace
+    /// what they had.
+    struct ProgramStatus: Equatable {
+        enum State: Equatable {
+            case idle
+            case working
+            case done
+            case blocked
+            case error
+
+            init(_ c: ghostty_action_program_status_state_e) {
+                switch c {
+                case GHOSTTY_PROGRAM_STATUS_WORKING: self = .working
+                case GHOSTTY_PROGRAM_STATUS_DONE: self = .done
+                case GHOSTTY_PROGRAM_STATUS_BLOCKED: self = .blocked
+                case GHOSTTY_PROGRAM_STATUS_ERROR: self = .error
+                default: self = .idle
+                }
+            }
+        }
+
+        /// What a `blocked` program needs from the user.
+        enum Kind: Equatable {
+            case permission
+            case question
+            case auth
+
+            init?(_ c: ghostty_action_program_status_kind_e) {
+                switch c {
+                case GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION: self = .permission
+                case GHOSTTY_PROGRAM_STATUS_KIND_QUESTION: self = .question
+                case GHOSTTY_PROGRAM_STATUS_KIND_AUTH: self = .auth
+                default: return nil
+                }
+            }
+        }
+
+        let state: State
+        let kind: Kind?
+        /// 0-100, or nil for indeterminate.
+        let progress: UInt8?
+        /// Empty for the root record.
+        let id: String
+        /// Inherited from the nearest ancestor by the core. Empty if none.
+        let app: String
+        /// Untrusted text from the program. Empty if absent.
+        let title: String
+        /// Untrusted text from the program. Empty if absent.
+        let msg: String
+    }
+
     struct Scrollbar {
         let total: UInt64
         let offset: UInt64
@@ -167,6 +219,25 @@ extension Ghostty.Action {
                 return nil
             }
         }
+    }
+}
+
+extension Ghostty.Action.ProgramStatus {
+    init(c: ghostty_action_program_status_record_s) {
+        self.state = State(c.state)
+        self.kind = Kind(c.kind)
+        self.progress = c.progress >= 0 ? UInt8(clamping: c.progress) : nil
+        self.id = c.id.map { String(cString: $0) } ?? ""
+        self.app = c.app.map { String(cString: $0) } ?? ""
+        self.title = c.title.map { String(cString: $0) } ?? ""
+        self.msg = c.msg.map { String(cString: $0) } ?? ""
+    }
+
+    /// Copy every record out of the action payload, which is only valid
+    /// during the action callback.
+    static func records(from c: ghostty_action_program_status_s) -> [Self] {
+        guard let records = c.records, c.len > 0 else { return [] }
+        return UnsafeBufferPointer(start: records, count: Int(c.len)).map(Self.init(c:))
     }
 }
 

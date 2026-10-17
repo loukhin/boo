@@ -60,6 +60,15 @@ enum TabBarColors {
         Color(nsColor: .labelColor).opacity(0.6)
     }
 
+    static func statusIndicator(_ style: TabStatusIndicator.Style) -> Color {
+        switch style {
+        case .active: Color(nsColor: .systemBlue)
+        case .attention: Color(nsColor: .systemOrange)
+        case .success: Color(nsColor: .systemGreen)
+        case .failure: Color(nsColor: .systemRed)
+        }
+    }
+
     // MARK: - Shadows
 
     static var tabShadow: Color {

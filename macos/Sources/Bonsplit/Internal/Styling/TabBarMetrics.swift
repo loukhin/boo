@@ -30,6 +30,12 @@ enum TabBarMetrics {
     static let closeButtonSize: CGFloat = 16
     static let closeIconSize: CGFloat = 9
     static let dirtyIndicatorSize: CGFloat = 8
+    static let statusIndicatorSize: CGFloat = 7
+    /// The fixed frame for the status mark, so switching between a dot, a
+    /// progress ring, and a symbol never changes the tab's width.
+    static let statusIndicatorFrame: CGFloat = 12
+    static let statusIndicatorSymbolSize: CGFloat = 10
+    static let statusIndicatorRingWidth: CGFloat = 1.5
     static let contentSpacing: CGFloat = 6
 
     // MARK: - Drop Indicator

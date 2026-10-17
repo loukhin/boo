@@ -177,12 +177,26 @@ struct BooWorkspaceSidebar: View {
     private func workspaceRow(workspace: BooWorkspace) -> some View {
         HStack(alignment: .top, spacing: TabBarMetrics.contentSpacing) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(state.workspaceDisplayTitle(workspace))
-                    .font(.system(size: TabBarMetrics.titleFontSize))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .foregroundStyle(workspaceRowTextColor(for: workspace))
+                HStack(alignment: .center, spacing: 4) {
+                    if let indicator = state.workspaceStatusIndicator(workspace) {
+                        TabStatusIndicatorView(indicator: indicator)
+                            // The active row is accent-filled, which can match
+                            // the mark's color, so give it a backdrop there.
+                            .background {
+                                if workspace.id == state.activeWorkspaceId {
+                                    Circle().fill(Color.white.opacity(0.9))
+                                }
+                            }
+                            .help(indicator.help ?? "")
+                    }
+
+                    Text(state.workspaceDisplayTitle(workspace))
+                        .font(.system(size: TabBarMetrics.titleFontSize))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(workspaceRowTextColor(for: workspace))
+                }
 
                 HStack(alignment: .center, spacing: 4) {
                     let bellCount = state.workspaceBellCount(workspace)

@@ -9,6 +9,7 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const Config = @import("../config.zig").Config;
 const MessageData = @import("../datastruct/main.zig").MessageData;
+const SurfaceProgramStatus = @import("../surface_program_status.zig");
 
 /// The message types that can be sent to a single surface.
 pub const Message = union(enum) {
@@ -140,6 +141,9 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// A program status (OSC 7501) event for the surface's records.
+    program_status: ProgramStatus,
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -159,6 +163,18 @@ pub const Message = union(enum) {
 
     /// Renderer pushed a new frame, redraw this surface.
     redraw,
+
+    pub const ProgramStatus = union(enum) {
+        /// A report from the program. The receiver takes ownership and
+        /// must free it with the surface allocator.
+        report: *SurfaceProgramStatus.Report,
+
+        /// A new shell prompt started (OSC 133 A).
+        prompt,
+
+        /// A full reset (RIS) removes every record.
+        reset,
+    };
 
     pub const ReportTitleStyle = enum {
         csi_21_t,

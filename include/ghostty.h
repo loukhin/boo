@@ -805,6 +805,43 @@ typedef struct {
   uint32_t height;
 } ghostty_action_resize_window_s;
 
+// apprt.action.ProgramStatus.State
+typedef enum {
+  GHOSTTY_PROGRAM_STATUS_IDLE,
+  GHOSTTY_PROGRAM_STATUS_WORKING,
+  GHOSTTY_PROGRAM_STATUS_DONE,
+  GHOSTTY_PROGRAM_STATUS_BLOCKED,
+  GHOSTTY_PROGRAM_STATUS_ERROR,
+} ghostty_action_program_status_state_e;
+
+// apprt.action.ProgramStatus.Kind
+typedef enum {
+  GHOSTTY_PROGRAM_STATUS_KIND_NONE,
+  GHOSTTY_PROGRAM_STATUS_KIND_PERMISSION,
+  GHOSTTY_PROGRAM_STATUS_KIND_QUESTION,
+  GHOSTTY_PROGRAM_STATUS_KIND_AUTH,
+} ghostty_action_program_status_kind_e;
+
+// apprt.action.ProgramStatus.Record
+// One OSC 7501 record. Strings are never NULL; absent values are empty.
+// `progress` is 0-100, or -1 when absent (indeterminate).
+typedef struct {
+  ghostty_action_program_status_state_e state;
+  ghostty_action_program_status_kind_e kind;
+  int16_t progress;
+  const char* id;
+  const char* app;
+  const char* title;
+  const char* msg;
+} ghostty_action_program_status_record_s;
+
+// apprt.action.ProgramStatus.C
+// The complete current set of records. Only valid during the callback.
+typedef struct {
+  const ghostty_action_program_status_record_s* records;
+  size_t len;
+} ghostty_action_program_status_s;
+
 // apprt.action.CellSize
 typedef struct {
   uint32_t width;
@@ -1016,6 +1053,7 @@ typedef enum {
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_PROGRAM_STATUS,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1029,6 +1067,7 @@ typedef union {
   ghostty_action_size_limit_s size_limit;
   ghostty_action_initial_size_s initial_size;
   ghostty_action_resize_window_s resize_window;
+  ghostty_action_program_status_s program_status;
   ghostty_action_cell_size_s cell_size;
   ghostty_action_scrollbar_s scrollbar;
   ghostty_action_inspector_e inspector;

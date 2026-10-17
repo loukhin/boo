@@ -775,6 +775,9 @@ pub const Application = extern struct {
             // GTK has no accessibility consumer for this yet.
             .selection_changed => {},
 
+            // GTK doesn't show program status (OSC 7501) yet.
+            .program_status => return false,
+
             .scrollbar => Action.scrollbar(target, value),
 
             .set_title => Action.setTitle(target, value),

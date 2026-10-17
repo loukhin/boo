@@ -12,6 +12,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const SurfaceProgramStatus = @import("../surface_program_status.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -92,6 +93,11 @@ pub const StreamHandler = struct {
     /// This is set to true when we've seen a title escape sequence. We use
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
+
+    /// True once a program status report (OSC 7501) has been forwarded
+    /// since the last full reset. Until then the surface has no records,
+    /// so prompts and resets don't need to tell it anything.
+    program_status_seen: bool = false,
 
     pub const Stream = terminal.Stream(StreamHandler);
 
@@ -383,13 +389,13 @@ pub const StreamHandler = struct {
             .apc_put => self.apc.feed(self.alloc, value),
             .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
             .kitty_clipboard => try self.kittyClipboard(value),
+            .program_status => self.programStatus(value),
 
             // Unimplemented
             .title_push,
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -946,6 +952,12 @@ pub const StreamHandler = struct {
 
         // Clear the progress bar
         self.progressReport(.{ .state = .remove });
+
+        // A full reset removes every program status record.
+        if (self.program_status_seen) {
+            self.program_status_seen = false;
+            self.surfaceMessageWriter(.{ .program_status = .reset });
+        }
     }
 
     /// Record a Kitty clipboard protocol session grant so future
@@ -1485,6 +1497,14 @@ pub const StreamHandler = struct {
                 self.surfaceMessageWriter(.start_command);
             },
 
+            // A new shell prompt (OSC 133 A, or N which also starts one)
+            // ends the lifetime of transient program status records.
+            .fresh_line_new_prompt,
+            .new_command,
+            => if (self.program_status_seen) {
+                self.surfaceMessageWriter(.{ .program_status = .prompt });
+            },
+
             .end_command => {
                 // The specification seems to not specify the type but
                 // other terminals accept 32-bits, but exit codes are really
@@ -1501,8 +1521,6 @@ pub const StreamHandler = struct {
             .end_prompt_start_input,
             .end_prompt_start_input_terminate_eol,
             .fresh_line,
-            .fresh_line_new_prompt,
-            .new_command,
             .prompt_start,
             => {},
         }
@@ -1945,6 +1963,38 @@ pub const StreamHandler = struct {
     /// Display a GUI progress report.
     fn progressReport(self: *StreamHandler, report: terminal.osc.Command.ProgressReport) void {
         self.surfaceMessageWriter(.{ .progress_report = report });
+    }
+
+    /// Handle a program status sequence (OSC 7501).
+    fn programStatus(
+        self: *StreamHandler,
+        cmd: terminal.osc.Command.ProgramStatus,
+    ) void {
+        switch (cmd) {
+            // Claim support. The reply is fixed bytes and never contains
+            // anything from a report, as the specification requires.
+            .query => |terminator| switch (terminator) {
+                inline else => |t| self.messageWriter(.{
+                    .write_stable = "\x1b]7501;" ++
+                        terminal.osc.program_status.query_reply ++
+                        comptime t.string(),
+                }),
+            },
+
+            .report => |parsed| {
+                // The report points into the parser's buffer, so copy it
+                // before handing it to the surface.
+                const report = SurfaceProgramStatus.Report.create(
+                    self.alloc,
+                    parsed,
+                ) catch |err| {
+                    log.warn("error copying program status report err={}", .{err});
+                    return;
+                };
+                self.program_status_seen = true;
+                self.surfaceMessageWriter(.{ .program_status = .{ .report = report } });
+            },
+        }
     }
 };
 

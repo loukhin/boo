@@ -19,17 +19,20 @@ struct TabItem: Identifiable, Hashable, Codable {
     var title: String
     var icon: String?
     var isDirty: Bool
+    var statusIndicator: TabStatusIndicator?
 
     init(
         id: UUID = UUID(),
         title: String,
         icon: String? = "doc.text",
-        isDirty: Bool = false
+        isDirty: Bool = false,
+        statusIndicator: TabStatusIndicator? = nil
     ) {
         self.id = id
         self.title = title
         self.icon = icon
         self.isDirty = isDirty
+        self.statusIndicator = statusIndicator
     }
 
     func hash(into hasher: inout Hasher) {

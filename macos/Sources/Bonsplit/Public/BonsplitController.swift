@@ -144,11 +144,14 @@ public final class BonsplitController {
     ///   - title: New title (pass nil to keep current)
     ///   - icon: New icon (pass nil to keep current, pass .some(nil) to remove icon)
     ///   - isDirty: New dirty state (pass nil to keep current)
+    ///   - statusIndicator: New status dot (pass nil to keep current, pass
+    ///     .some(nil) to remove it)
     public func updateTab(
         _ tabId: TabID,
         title: String? = nil,
         icon: String?? = nil,
-        isDirty: Bool? = nil
+        isDirty: Bool? = nil,
+        statusIndicator: TabStatusIndicator?? = nil
     ) {
         guard let (pane, tabIndex) = findTabInternal(tabId) else { return }
 
@@ -160,6 +163,9 @@ public final class BonsplitController {
         }
         if let isDirty = isDirty {
             pane.tabs[tabIndex].isDirty = isDirty
+        }
+        if let statusIndicator, pane.tabs[tabIndex].statusIndicator != statusIndicator {
+            pane.tabs[tabIndex].statusIndicator = statusIndicator
         }
     }
 
@@ -334,7 +340,7 @@ public final class BonsplitController {
 
         let internalTab: TabItem?
         if let tab {
-            internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+            internalTab = tab.tabItem
         } else {
             internalTab = nil
         }
@@ -396,7 +402,7 @@ public final class BonsplitController {
 
         // When source == target, we need to split first THEN remove the tab
         // from the original pane. Otherwise we'd be trying to split an empty pane.
-        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        let internalTab = tab.tabItem
 
         if sourcePaneId == targetPaneId {
             // Same-pane drag: split the pane, move the dragged tab to the new
@@ -494,7 +500,7 @@ public final class BonsplitController {
     public func adoptTab(_ tab: Tab, inPane paneId: PaneID, atIndex index: Int? = nil) -> Bool {
         guard let pane = internalController.rootNode?.findPane(paneId) else { return false }
 
-        let tabItem = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        let tabItem = tab.tabItem
         if let index {
             pane.insertTab(tabItem, at: index)
         } else {
@@ -529,7 +535,7 @@ public final class BonsplitController {
             return nil
         }
 
-        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        let internalTab = tab.tabItem
         internalController.splitPaneWithTab(
             targetPaneId,
             orientation: orientation,
@@ -601,7 +607,7 @@ public final class BonsplitController {
     public func moveTab(_ tab: Tab, from sourcePaneId: PaneID, to targetPaneId: PaneID, atIndex index: Int? = nil) {
         let panesBefore = Set(internalController.rootNode?.allPaneIds.map { $0.id } ?? [])
 
-        let internalTab = TabItem(id: tab.id.id, title: tab.title, icon: tab.icon, isDirty: tab.isDirty)
+        let internalTab = tab.tabItem
         internalController.moveTab(internalTab, from: sourcePaneId, to: targetPaneId, atIndex: index)
 
         delegate?.splitTabBar(self, didFocusPane: targetPaneId)

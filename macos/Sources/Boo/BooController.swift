@@ -772,6 +772,12 @@ final class BooController: NSWindowController, NSMenuItemValidation {
             return true
         }
 
+        // Jump to the next tab whose program needs the user (OSC 7501). If
+        // no tab needs attention, let the key through to the terminal.
+        if flags == [.command, .shift], Self.isKey(event, characters: "a", keyCode: 0x00) {
+            return state.presentNextTabNeedingAttention()
+        }
+
         if flags == [.command], Self.isKey(event, characters: "n", keyCode: 0x2D) {
             state.newWorkspace(
                 baseConfig: state.inheritedConfigForFocusedSurface(

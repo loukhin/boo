@@ -37,6 +37,7 @@ const App = @import("App.zig");
 const internal_os = @import("os/main.zig");
 const inspectorpkg = @import("inspector/main.zig");
 const SurfaceMouse = @import("surface_mouse.zig");
+const SurfaceProgramStatus = @import("surface_program_status.zig");
 const ProcessInfo = @import("pty.zig").ProcessInfo;
 
 const log = std.log.scoped(.surface);
@@ -186,6 +187,9 @@ search: ?Search = null,
 
 /// Used to rate limit BEL handling.
 last_bell_time: ?std.Io.Timestamp = null,
+
+/// Program status records (OSC 7501) reported by programs in this surface.
+program_status: SurfaceProgramStatus.Records = .{},
 
 /// The effect of an input event. This can be used by callers to take
 /// the appropriate action after an input event. For example, key
@@ -836,6 +840,7 @@ pub fn deinit(self: *Surface) void {
     self.io_thread.deinit();
     self.mouse.selection_gesture.deinit(&self.io.terminal);
     self.io.deinit();
+    self.program_status.deinit(self.alloc);
 
     if (self.inspector) |v| {
         v.deinit(self.alloc);
@@ -1166,6 +1171,15 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status => |v| {
+            const changed = switch (v) {
+                .report => |report| self.program_status.apply(self.alloc, report),
+                .prompt => self.program_status.pruneTransient(self.alloc),
+                .reset => self.program_status.clearAll(self.alloc),
+            };
+            if (changed) self.notifyProgramStatus();
+        },
+
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();
@@ -1274,9 +1288,25 @@ fn selectionScrollTick(self: *Surface) !void {
     try self.queueRender();
 }
 
+/// Send the current program status records to the apprt.
+fn notifyProgramStatus(self: *Surface) void {
+    var buf: [SurfaceProgramStatus.Records.max]apprt.action.ProgramStatus.Record = undefined;
+    _ = self.rt_app.performAction(
+        .{ .surface = self },
+        .program_status,
+        .{ .records = self.program_status.snapshot(&buf) },
+    ) catch |err| {
+        log.warn("apprt failed to report program status err={}", .{err});
+    };
+}
+
 fn childExited(self: *Surface, info: apprt.surface.Message.ChildExited) void {
     // Mark our flag that we exited immediately
     self.child_exited = true;
+
+    // The program status specification ties record lifetimes to the
+    // process attached to the terminal exiting.
+    if (self.program_status.pruneTransient(self.alloc)) self.notifyProgramStatus();
 
     // If our runtime was below some threshold then we assume that this
     // was an abnormal exit and we show an error message.
@@ -2779,6 +2809,16 @@ pub fn keyCallback(
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
+
+    // The user is back at this terminal and pressed a key, so they've seen
+    // any finished program status. The specification leaves dismissing
+    // `done` and `error` records to the terminal and suggests this.
+    if (event.action == .press and
+        !event.key.modifier() and
+        self.program_status.dismissFinished(self.alloc))
+    {
+        self.notifyProgramStatus();
+    }
 
     // Setup our inspector event if we have an inspector.
     var insp_ev: ?inspectorpkg.KeyEvent = if (self.inspector != null) ev: {

@@ -364,6 +364,13 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// The program status records (OSC 7501) of the target surface changed.
+    /// The payload is the complete current set of records, so the apprt
+    /// should replace whatever it showed before. An empty set means
+    /// nothing to show. The records are only valid for the duration of
+    /// the call; copy anything that needs to be kept.
+    program_status: ProgramStatus,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +443,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        program_status,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -743,6 +751,80 @@ pub const InitialSize = extern struct {
 pub const ResizeWindow = extern struct {
     width: u32,
     height: u32,
+};
+
+/// The program status records (OSC 7501) of a surface. See
+/// `surface_program_status.zig` for how records are kept.
+pub const ProgramStatus = struct {
+    records: []const Record,
+
+    /// Sync with: ghostty_action_program_status_state_e
+    pub const State = enum(c_int) {
+        idle,
+        working,
+        done,
+        blocked,
+        @"error",
+
+        test "ghostty.h ProgramStatus.State" {
+            try lib.checkGhosttyHEnum(State, "GHOSTTY_PROGRAM_STATUS_");
+        }
+    };
+
+    /// Sync with: ghostty_action_program_status_kind_e
+    pub const Kind = enum(c_int) {
+        none,
+        permission,
+        question,
+        auth,
+
+        test "ghostty.h ProgramStatus.Kind" {
+            try lib.checkGhosttyHEnum(Kind, "GHOSTTY_PROGRAM_STATUS_KIND_");
+        }
+    };
+
+    /// One record. Strings are never null; an absent value is empty.
+    ///
+    /// Sync with: ghostty_action_program_status_record_s
+    pub const Record = extern struct {
+        state: State,
+        /// Only set for `blocked`.
+        kind: Kind,
+        /// 0 to 100, or -1 when absent (indeterminate). Only set for
+        /// `working` and `blocked`.
+        progress: i16,
+        /// Empty for the root record.
+        id: [*:0]const u8,
+        /// Already inherited from the nearest ancestor if the record
+        /// didn't have its own.
+        app: [*:0]const u8,
+        /// Decoded, untrusted text from the program.
+        title: [*:0]const u8,
+        /// Decoded, untrusted text from the program.
+        msg: [*:0]const u8,
+    };
+
+    // Sync with: ghostty_action_program_status_s
+    pub const C = extern struct {
+        records: [*]const Record,
+        len: usize,
+    };
+
+    pub fn cval(self: ProgramStatus) C {
+        return .{
+            .records = self.records.ptr,
+            .len = self.records.len,
+        };
+    }
+
+    pub fn format(
+        value: @This(),
+        comptime _: []const u8,
+        _: std.fmt.Options,
+        writer: *std.Io.Writer,
+    ) !void {
+        try writer.print("{s}{{ len={d} }}", .{ @typeName(@This()), value.records.len });
+    }
 };
 
 pub const CellSize = extern struct {

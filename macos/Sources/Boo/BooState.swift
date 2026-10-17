@@ -1422,8 +1422,127 @@ final class BooState: ObservableObject {
             }
             .store(in: &subs)
 
+        // `@Published` replays the current value on subscribe, so this also
+        // restores the mark for surfaces adopted from another window. The
+        // tracker lives and dies with this subscription.
+        let tracker = ProgramStatusTracker()
+        surface.$programStatus
+            .removeDuplicates()
+            .sink { [weak self, weak surface] records in
+                guard let self, let surface else { return }
+                self.programStatusDidChange(
+                    records,
+                    tabId: tabId,
+                    surface: surface,
+                    tracker: tracker
+                )
+            }
+            .store(in: &subs)
+
         surfaceSubscriptions[tabId] = subs
         syncTabBellIndicator(tabId, surface: surface)
+    }
+
+    // MARK: - Program status (OSC 7501)
+
+    /// Per-tab state for program status notifications.
+    private final class ProgramStatusTracker {
+        /// Nil until the first value, so replaying existing records when a
+        /// surface is adopted doesn't notify again.
+        var lastStyle: TabStatusIndicator.Style??
+        var lastNotified: Date?
+    }
+
+    /// The specification asks terminals to rate-limit effects outside the
+    /// terminal, since a program can change state as fast as it can write.
+    private static let programStatusNotificationInterval: TimeInterval = 5
+
+    private func programStatusDidChange(
+        _ records: [Ghostty.Action.ProgramStatus],
+        tabId: TabID,
+        surface: Ghostty.SurfaceView,
+        tracker: ProgramStatusTracker
+    ) {
+        let indicator = BooProgramStatus.indicator(for: records)
+        controllerContaining(tabId: tabId)?.updateTab(tabId, statusIndicator: .some(indicator))
+
+        // The workspace sidebar aggregates every tab's records.
+        objectWillChange.send()
+
+        let style = indicator?.style
+        defer { tracker.lastStyle = .some(style) }
+        guard let previous = tracker.lastStyle, previous != style else { return }
+        guard let style, style != .active,
+              let record = BooProgramStatus.mostUrgent(records) else { return }
+
+        // Bounce the Dock icon when something is waiting on the user and
+        // Boo isn't in front, like a bell with `bell-features = attention`.
+        if style == .attention && !NSApp.isActive {
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+
+        notifyProgramStatus(record, surface: surface, tracker: tracker)
+    }
+
+    private func notifyProgramStatus(
+        _ record: Ghostty.Action.ProgramStatus,
+        surface: Ghostty.SurfaceView,
+        tracker: ProgramStatusTracker
+    ) {
+        guard ghostty.config.desktopNotifications else { return }
+
+        // Nothing to tell a user who is already looking at this terminal.
+        let isWatching = NSApp.isActive && window?.isKeyWindow == true && surface.focused
+        guard !isWatching else { return }
+
+        let now = Date()
+        if let last = tracker.lastNotified,
+           now.timeIntervalSince(last) < Self.programStatusNotificationInterval {
+            return
+        }
+
+        guard let content = BooProgramStatus.notification(for: record) else { return }
+        tracker.lastNotified = now
+
+        // The notification subtitle is the surface title, so it says which
+        // terminal it came from, as the specification asks. Clicking it
+        // presents the surface through `ghosttyPresentTerminal`.
+        surface.showUserNotification(title: content.title, body: content.body)
+    }
+
+    /// The status mark for a whole workspace: the most urgent record across
+    /// all of its tabs.
+    func workspaceStatusIndicator(_ workspace: BooWorkspace) -> TabStatusIndicator? {
+        let records = workspace.controller.allTabIds.flatMap { surfaces[$0]?.programStatus ?? [] }
+        return BooProgramStatus.indicator(for: records)
+    }
+
+    /// Present the next tab whose program is waiting on the user, cycling
+    /// through all workspaces in sidebar order starting after the current
+    /// tab. If nothing is waiting, finished or failed tabs are next.
+    /// Returns false if no tab needs attention.
+    @discardableResult
+    func presentNextTabNeedingAttention() -> Bool {
+        let ordered = workspaces.flatMap { workspace in
+            workspace.controller.allTabIds.compactMap { tabId -> (TabID, Ghostty.SurfaceView, TabStatusIndicator.Style)? in
+                guard let surface = surfaces[tabId],
+                      let style = BooProgramStatus.indicator(for: surface.programStatus)?.style,
+                      style != .active else { return nil }
+                return (tabId, surface, style)
+            }
+        }
+        let preferred = ordered.contains { $0.2 == .attention }
+            ? ordered.filter { $0.2 == .attention }
+            : ordered
+        guard !preferred.isEmpty else { return false }
+
+        // Start after the focused tab so repeated presses cycle.
+        let currentIndex = focusedOwnedSurface.flatMap { focused in
+            preferred.firstIndex { $0.1 === focused }
+        }
+        let next = currentIndex.map { preferred[($0 + 1) % preferred.count] } ?? preferred[0]
+        presentSurface(next.1)
+        return true
     }
 
     // MARK: - Bell aggregation

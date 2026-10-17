@@ -21,6 +21,8 @@ struct TabItemView: View {
 
     var body: some View {
         HStack(spacing: TabBarMetrics.contentSpacing) {
+            statusIndicatorDot
+
             // Icon
             if let iconName = tab.icon {
                 Image(systemName: iconName)
@@ -72,6 +74,7 @@ struct TabItemView: View {
                 isHovered = hovering
             }
         }
+        .help(tab.statusIndicator?.help ?? "")
         .contextMenu {
             Button("Rename Tab...") {
                 onRename()
@@ -79,7 +82,7 @@ struct TabItemView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(tab.title)
-        .accessibilityValue(tab.isDirty ? "Modified" : "")
+        .accessibilityValue(accessibilityValue)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 
@@ -112,6 +115,30 @@ struct TabItemView: View {
                     .frame(width: 1)
             }
         }
+    }
+
+    // MARK: - Status Indicator
+
+    @ViewBuilder
+    private var statusIndicatorDot: some View {
+        if let indicator = tab.statusIndicator {
+            TabStatusIndicatorView(indicator: indicator)
+        }
+    }
+
+    private var accessibilityValue: String {
+        let status: String? = tab.statusIndicator.map { indicator in
+            if let help = indicator.help { return help }
+            switch indicator.style {
+            case .active: return "Running"
+            case .attention: return "Needs attention"
+            case .success: return "Finished"
+            case .failure: return "Failed"
+            }
+        }
+        return [status, tab.isDirty ? "Modified" : nil]
+            .compactMap { $0 }
+            .joined(separator: ", ")
     }
 
     // MARK: - Split Zoom Indicator
