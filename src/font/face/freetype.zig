@@ -471,7 +471,21 @@ pub const Face = struct {
         const cell_height: f64 = @floatFromInt(metrics.cell_height);
 
         // Next we apply any constraints to get the final size of the glyph.
-        const constraint = opts.constraint;
+        // An unconstrained glyph whose advance is wider than its cells is
+        // fitted and centered (see `Constraint.overwide`), but only if it's
+        // this font's own glyph for the cell's character, never a ligature.
+        const constraint: Glyph.RenderOptions.Constraint = constraint: {
+            const c = opts.constraint;
+            if (c.doesAnything() or opts.codepoint == 0) break :constraint c;
+            const overwide = Glyph.RenderOptions.Constraint.overwide(
+                rect,
+                f26dot6ToF64(glyph.*.advance.x),
+                metrics,
+                opts.constraint_width,
+            ) orelse break :constraint c;
+            if (self.glyphIndex(opts.codepoint) != glyph_index) break :constraint c;
+            break :constraint overwide;
+        };
 
         // We need to add the baseline position before passing to the constrain
         // function since it operates on cell-relative positions, not baseline.

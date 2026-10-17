@@ -64,6 +64,15 @@ pub const RenderOptions = struct {
     /// there's whitespace to the right of the cell then it can be 2.
     constraint_width: u2 = 1,
 
+    /// The codepoint of the cell this glyph is rendered for, or 0 if
+    /// unknown. Used to recognize when a glyph is the font's own glyph for a
+    /// single character, as opposed to a ligature. See `Constraint.overwide`.
+    ///
+    /// Not part of the glyph cache key: rasterizers only use it to confirm
+    /// that a glyph is the nominal glyph for its character, which is a
+    /// property of the glyph index itself.
+    codepoint: u21 = 0,
+
     /// Thicken the glyph. This draws the glyph with a thicker stroke width.
     /// This is purely an aesthetic setting.
     ///
@@ -173,6 +182,51 @@ pub const RenderOptions = struct {
             return self.size != .none or
                 self.align_horizontal != .none or
                 self.align_vertical != .none;
+        }
+
+        /// A constraint for an unconstrained glyph whose advance is wider than
+        /// the cells it's drawn in, or null if it fits.
+        ///
+        /// Monospace fonts sometimes give a few glyphs (for example U+2318
+        /// PLACE OF INTEREST SIGN) a wider advance than every other character.
+        /// Text views give such a glyph its full advance, so it looks centered
+        /// in its own space. The terminal grid only gives it one cell, and
+        /// since unconstrained glyphs are positioned by their left bearing,
+        /// the ink hangs off the right side of the cell.
+        ///
+        /// This treats the glyph's whole advance box, including its side
+        /// bearings, as the thing to fit: it's scaled down so the box fits the
+        /// available cells and then centered, keeping the designer's spacing
+        /// in proportion.
+        ///
+        /// Callers must only use this for a font's nominal glyph for a single
+        /// character. A ligature glyph is also wider than one cell, but it
+        /// replaces several cells and must keep spanning them.
+        pub fn overwide(
+            /// The glyph's ink bounding box, relative to the pen origin.
+            glyph: Glyph.Size,
+            /// The glyph's horizontal advance, in the same units.
+            advance: f64,
+            metrics: Metrics,
+            /// Number of cells horizontally available for this glyph.
+            constraint_width: u2,
+        ) ?Constraint {
+            const span = metrics.face_width * @as(f64, @floatFromInt(constraint_width));
+
+            // A small tolerance so rounding noise in otherwise monospace
+            // advances never triggers this.
+            if (span <= 0 or advance <= span * 1.01) return null;
+            if (glyph.width <= 0) return null;
+
+            return .{
+                .size = .fit,
+                .align_horizontal = .center,
+                // Make the scale group the advance box rather than the ink,
+                // so the side bearings scale along with the glyph.
+                .relative_width = glyph.width / advance,
+                .relative_x = glyph.x / advance,
+                .max_constraint_width = constraint_width,
+            };
         }
 
         /// Apply this constraint to the provided glyph
@@ -626,5 +680,66 @@ test "Constraints" {
             },
             constraint.constrain(glyph_E0C0, metrics, 2),
         );
+    }
+
+    // Overwide glyph in a monospace font: '⌘' (U+2318) from Paper Mono, whose
+    // advance is 758 units while every other glyph is 606. Scaled so that
+    // 606 units equals this grid's face width.
+    {
+        const unit = metrics.face_width / 606.0;
+        const glyph_2318: GlyphSize = .{
+            .width = 712 * unit,
+            .height = 10,
+            .x = 23 * unit,
+            .y = 5,
+        };
+        const advance = 758 * unit;
+
+        const constraint = RenderOptions.Constraint.overwide(
+            glyph_2318,
+            advance,
+            metrics,
+            1,
+        ).?;
+
+        // The advance box is scaled to exactly one face width, so the ink
+        // keeps its proportional side bearings and ends up centered.
+        const scale = 606.0 / 758.0;
+        const result = constraint.constrain(glyph_2318, metrics, 1);
+        try comparison.expectApproxEqual(
+            GlyphSize{
+                .width = glyph_2318.width * scale,
+                .height = glyph_2318.height * scale,
+                .x = glyph_2318.x * scale,
+                // Scaled about its vertical center (y + height / 2 = 10).
+                .y = 10 - 5 * scale,
+            },
+            result,
+        );
+        const left_gap = result.x;
+        const right_gap = metrics.face_width - (result.x + result.width);
+        try std.testing.expectApproxEqAbs(left_gap, right_gap, 1e-9);
+    }
+
+    // Glyphs whose advance fits their cells are left alone.
+    {
+        // 'M' in the same font: advance equals the face width.
+        const unit = metrics.face_width / 606.0;
+        const glyph_M: GlyphSize = .{ .width = 501 * unit, .height = 10, .x = 52 * unit, .y = 5 };
+        try std.testing.expect(RenderOptions.Constraint.overwide(
+            glyph_M,
+            606 * unit,
+            metrics,
+            1,
+        ) == null);
+
+        // A wide character whose advance fits its two cells.
+        const glyph_wide: GlyphSize = .{ .width = 17, .height = 18, .x = 1, .y = 2 };
+        try std.testing.expect(RenderOptions.Constraint.overwide(
+            glyph_wide,
+            2 * metrics.face_width,
+            metrics,
+            2,
+        ) == null);
     }
 }

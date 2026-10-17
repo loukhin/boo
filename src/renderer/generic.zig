@@ -3499,6 +3499,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         x,
                         cols,
                     ),
+                    .codepoint = cp,
                 },
             );
 
