@@ -44,6 +44,39 @@ struct TabStatusIndicatorView: View {
             height: TabBarMetrics.statusIndicatorFrame
         )
         .animation(.easeInOut(duration: 0.2), value: indicator.progress)
+        .modifier(StatusBreathing(isActive: indicator.style == .active))
         .accessibilityHidden(true)
+    }
+}
+
+/// Slowly fades in-progress marks in and out so a running tab reads as
+/// alive. Other states stay still. Off when Reduce Motion is enabled.
+private struct StatusBreathing: ViewModifier {
+    let isActive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dimmed = false
+
+    private var animates: Bool { isActive && !reduceMotion }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(animates && dimmed ? 0.35 : 1)
+            .onAppear(perform: sync)
+            .onChange(of: animates) { _, _ in sync() }
+    }
+
+    private func sync() {
+        guard animates else {
+            // Stop without animating back; opacity is already 1 because
+            // `animates` is false.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { dimmed = false }
+            return
+        }
+        withAnimation(.easeInOut(duration: 1).repeatForever(autoreverses: true)) {
+            dimmed = true
+        }
     }
 }
