@@ -50,7 +50,12 @@ struct TabItemView: View {
         // Asymmetric padding: full horizontal padding on the leading side
         // (for the icon/title), tighter on the trailing side so the close
         // button sits closer to the edge and the tab feels more compact.
-        .padding(.leading, TabBarMetrics.tabHorizontalPadding)
+        .padding(
+            .leading,
+            tab.statusIndicator == nil
+                ? TabBarMetrics.tabHorizontalPadding
+                : TabBarMetrics.tabStatusLeadingPadding
+        )
         .padding(.trailing, TabBarMetrics.tabTrailingPadding)
         .offset(y: isSelected ? 0.5 : 0)
         .frame(

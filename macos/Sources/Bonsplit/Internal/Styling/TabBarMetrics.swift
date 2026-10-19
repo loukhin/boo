@@ -17,6 +17,10 @@ enum TabBarMetrics {
     static let tabTitleMaxWidth: CGFloat = 180
     static let tabCornerRadius: CGFloat = 0
     static let tabHorizontalPadding: CGFloat = 12
+    /// Leading padding when a status mark leads the tab. Tighter than
+    /// `tabHorizontalPadding` because the mark's fixed frame already adds
+    /// space around the dot.
+    static let tabStatusLeadingPadding: CGFloat = 7
     /// Trailing-side padding — intentionally tighter than leading to keep
     /// the close button close to the tab edge.
     static let tabTrailingPadding: CGFloat = 4
